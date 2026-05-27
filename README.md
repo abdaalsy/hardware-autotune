@@ -12,7 +12,7 @@ For info on the digital implementations of autotune and other effects, see the f
 
 ### Recording
 
-![Recording Circuit Diagram](.docs/assets/recording_circuit.png)
+![Recording Circuit Diagram](./docs/assets/recording_circuit.png)
 
 Above is the circuit diagram detailing how microphone input will be processed before reaching the ADC, and then the DSP. 
 
@@ -24,7 +24,7 @@ Above is the circuit diagram detailing how microphone input will be processed be
 
 ### Playback
 
-![Playback Circuit Diagram](.docs/assets/playback_circuit.png)
+![Playback Circuit Diagram](./docs/assets/playback_circuit.png)
 
 Above is the circuit diagram detailing how our processed audio (digital) will be played on a speaker after being converted into analog by our DAC.
 
