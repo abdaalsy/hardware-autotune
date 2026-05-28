@@ -1,0 +1,4 @@
+venv/
+fpga/build/
+.python-version
+vtr-verilog-to-routing/
