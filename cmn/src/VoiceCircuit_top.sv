@@ -4,3 +4,7 @@ initial begin
     $dumpvars(0, VoiceCircuit_top); // Dumps all signals inside the top module
 end
 `endif
+`default_nettype none
+
+module VoiceCircuit_top (
+);

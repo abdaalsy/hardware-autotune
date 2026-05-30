@@ -2,7 +2,7 @@
 
 I'm re-creating the autotune effect using digital circuits. When complete, I plan to have a device that can connect to a microphone, and includes an onboard speaker with the option to connect a separate speaker instead. The user will speak into the microphone, the circuit I made with HDL is gonna apply autotune, and then the result will playback on the speaker.
 
-## Design
+## Analog Circuit Design
 
 This section will cover the design of the recording and playback analog circuits. I specifically left component values unknown as I they depend on certain specifications that I haven't decided yet.
 
@@ -26,12 +26,13 @@ Above is the circuit diagram detailing how microphone input will be processed be
 
 ![Playback Circuit Diagram](./docs/assets/playback_circuit.png)
 
-Above is the circuit diagram detailing how our processed audio (digital) will be played on a speaker after being converted into analog by our DAC.
+Above is the circuit diagram detailing how our DSP's digital output will be processed in order to be played on analog speakers.
 
-1. At the DAC output, our signal is going to be centered at some voltage above $0 V$, we send our signal through a difference amplifier to recenter it at $0 V$.
-2. We place capacitor $C_2$ after the difference amplifier to ensure our signal is centered at zero, for the best audio quality.
-3. While our signal has the amplitude required, it lacks the current needed to produce loud and rich audio. We use two source follower amplifiers, one for the positive half-cycle, and one for the negative. The diodes bias these transistors so that they are held at the edge of saturation, which is required to prevent crossover distortion. I specifically chose source follower amplifiers because the gain is unity, keeping our signal at the amplitude we like.
-4. Now our audio signal is ready to be played on the speaker. Speakers can be modelled by an $8 \Omega$ impedance, showcasing their high current demands. This speaker will be onboard. The displacement of the speaker depends on the potential difference between its terminals.
+1. The DSP feeds digital input data representing our audio into the DAC, which converts it into an analog waveform. I chose a PCM1771PW, and specifically left $H_{out}R$ disconnected because we're dealing with mono sound.
+2. At the DAC output, our signal is going to be centered at some voltage above $0 V$, we send our signal through a difference amplifier to recenter it at $0 V$.
+3. We place capacitor $C_2$ after the difference amplifier to ensure our signal is centered at zero, for the best audio quality. It is after this capacitor where a 3.5mm headphones jack is placed to allow people to connect their own speakers/headphones.
+4. While our signal has the amplitude required, it lacks the current needed to produce loud and rich audio. We use two source follower amplifiers, one for the positive half-cycle, and one for the negative. The diodes bias these transistors so that they are held at the edge of saturation, which is required to prevent crossover distortion. I specifically chose source follower amplifiers because the gain is unity, keeping our signal at the amplitude we like.
+5. Now our audio signal is ready to be played on the speaker. Speakers can be modelled by an $8 \Omega$ impedance, showcasing their high current demands. This speaker will be onboard. The displacement of the speaker depends on the potential difference between its terminals.
 
 ## Parts
 
