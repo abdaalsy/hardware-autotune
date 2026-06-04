@@ -16,11 +16,11 @@ For info on the digital implementations of autotune and other effects, see the f
 
 Above is the circuit diagram detailing how microphone input will be processed before reaching the ADC, and then the DSP. 
 
-1. We start at the voltage source labelled $V_{mic}$, this represents the microphone which converts your voice into an AC waveform with a very small amplitude. Microphones typically require a small amount of plug in power, so we connect the microphone to our $3.3 V$ source, with a resistor to limit current.
-2. Because the DC plug in power is on the same line as the AC output, we place a capacitor $C_1$ to recenter our AC waveform at $0 V$. 
-3. Now, we pass our microphone signal through an inverting amplifier circuit to get it to the ADC's desired amplitude.
-4. Our waveform is still centered at $0 V$, we need to move it such that the minimum value of our waveform is at $0 V$, so we use a summing amplifier to accomplish that.
-5. Now, our signal is ready to pass through the ADC and be processed by the DSP.
+1. We start at the voltage source labelled $V_{mic}$, this represents the microphone which converts your voice into an AC waveform with a very small amplitude. Microphones typically require a small amount of plug in power, so we connect the microphone to our $3.3 V$ source, with a resistor to limit current, and a capacitor to shunt noise to GND. J1 is a headphones jack that will close this circuit.
+2. Switch $S_1$ acts as an on/off switch for accepting microphone input. When in the downwards OFF position, the ADC should receive a constant $0 V$. In the upwards ON position, it should allow our microphone signal to pass to the next stage.
+3. Because the DC plug in power is on the same line as the AC output, we place a capacitor $C_1$ to recenter our AC waveform at $0 V$. 
+4. Here we pass our microphone signal through a non-inverting amplifier circuit to get it to the ADC's desired amplitude.
+5. Now, our signal is ready to pass through the ADC and be processed by the DSP. The ADC was wired up according to the [datasheet](docs/sles011e.pdf) under the section "Application and Implementation".
 
 ### Playback
 
@@ -28,11 +28,12 @@ Above is the circuit diagram detailing how microphone input will be processed be
 
 Above is the circuit diagram detailing how our DSP's digital output will be processed in order to be played on analog speakers.
 
-1. The DSP feeds digital input data representing our audio into the DAC, which converts it into an analog waveform. I chose a PCM1771PW, and specifically left $H_{out}R$ disconnected because we're dealing with mono sound.
-2. At the DAC output, our signal is going to be centered at some voltage above $0 V$, we send our signal through a difference amplifier to recenter it at $0 V$.
-3. We place capacitor $C_2$ after the difference amplifier to ensure our signal is centered at zero, for the best audio quality. It is after this capacitor where a 3.5mm headphones jack is placed to allow people to connect their own speakers/headphones.
-4. While our signal has the amplitude required, it lacks the current needed to produce loud and rich audio. We use two source follower amplifiers, one for the positive half-cycle, and one for the negative. The diodes bias these transistors so that they are held at the edge of saturation, which is required to prevent crossover distortion. I specifically chose source follower amplifiers because the gain is unity, keeping our signal at the amplitude we like.
-5. Now our audio signal is ready to be played on the speaker. Speakers can be modelled by an $8 \Omega$ impedance, showcasing their high current demands. This speaker will be onboard. The displacement of the speaker depends on the potential difference between its terminals.
+1. The DSP feeds digital input data representing our audio into the DAC, which converts it into an analog waveform. I specifically left $H_{out}R$ disconnected because we're dealing with mono sound. The DAC was wired up according to the [datasheet](docs/pcm1808.pdf) under the section "Application Information".
+2. At the DAC output, our signal is going to be centered at $1.65 V$, we send our signal through a capacitor to recenter it at $0 V$. Also, we use an RC high-pass filter to shunt the high frequency switching noise to ground.
+3. Now our signal is ready to be played on active speakers like those for headphones, as they require less power to operate.
+4. For those who want to use the onboard speaker, the signal lacks the amplitude required, so we pass it through a non-inverting amplifier to bring it up.
+5. While our signal has the amplitude required, it lacks the current needed to produce loud and rich audio. We use two source follower amplifiers, one for the positive half-cycle, and one for the negative. The diodes bias these transistors so that they are held at the edge of saturation, which is required to prevent crossover distortion. I specifically chose source follower amplifiers because the gain is unity, keeping our signal at the amplitude we like.
+6. Now our audio signal is ready to be played on the speaker. Speakers can be modelled by an $8 \Omega$ impedance, showcasing their high current demands. This speaker will be onboard. The displacement of the speaker depends on the potential difference between its terminals.
 
 ## Parts
 
