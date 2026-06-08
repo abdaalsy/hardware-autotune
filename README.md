@@ -22,6 +22,24 @@ Above is the circuit diagram detailing how microphone input will be processed be
 4. Here we pass our microphone signal through a non-inverting amplifier circuit to get it to the ADC's desired amplitude.
 5. Now, our signal is ready to pass through the ADC and be processed by the DSP. The ADC was wired up according to the [datasheet](docs/pcm1808.pdf) under the section "Application and Implementation".
 
+Component Values:
+
+- Amplifier supply: $+5 V$ and $-5 V$
+- $R_{plug}$: $2.2 k\Omega$
+- $C_1$: $10 \mu\text{F}$ Aluminum Electrolytic
+- $C_2$: $10 \mu\text{F}$ Aluminum Electrolytic
+- $R_b$: $10 k\Omega$
+- $R_{i(mic)}$: 
+- $R_{f(mic)}$:
+- $C_3$: $0.1 \mu\text{F}$ Ceramic, $10 \mu\text{F}$ Aluminum Electrolytic
+- $C_4$: $1 \mu\text{F}$ Aluminum Electrolytic
+- $C_5$: $0.1 \mu\text{F}$ Ceramic, $10 \mu\text{F}$ Aluminum Electrolytic
+- $C_6$: $0.1 \mu\text{F}$ Ceramic, $10 \mu\text{F}$ Aluminum Electrolytic
+
+Important:
+
+- $C_3$, $C_5$, and $C_6$ should be placed as close as possible to their respective pins.
+
 ### Playback
 
 ![Playback Circuit Diagram](./docs/assets/playback_circuit.png)
