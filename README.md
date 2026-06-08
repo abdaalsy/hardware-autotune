@@ -14,7 +14,7 @@ For info on the digital implementations of autotune and other effects, see the f
 
 ![Recording Circuit Diagram](./docs/assets/recording_circuit.png)
 
-Above is the circuit diagram detailing how microphone input will be processed before reaching the ADC, and then the DSP. 
+Above is the circuit diagram detailing how microphone input will be processed before reaching the ADC, and then the DSP. Assume all connections to the DSP have $100 \omega$ resistors.
 
 1. We start at the voltage source labelled $V_{mic}$, this represents the microphone which converts your voice into an AC waveform with a very small amplitude. Microphones typically require a small amount of plug in power, so we connect the microphone to our $3.3 V$ source, with a resistor to limit current, and a capacitor to shunt noise to GND. J1 is a headphones jack that will close this circuit.
 2. Switch $S_1$ acts as an on/off switch for accepting microphone input. When in the downwards OFF position, the ADC should receive a constant $0 V$. In the upwards ON position, it should allow our microphone signal to pass to the next stage.
@@ -26,7 +26,7 @@ Above is the circuit diagram detailing how microphone input will be processed be
 
 ![Playback Circuit Diagram](./docs/assets/playback_circuit.png)
 
-Above is the circuit diagram detailing how our DSP's digital output will be processed in order to be played on analog speakers.
+Above is the circuit diagram detailing how our DSP's digital output will be processed in order to be played on analog speakers. Assume all connections to the DSP have $100 \omega$ resistors.
 
 1. The DSP feeds digital input data representing our audio into the DAC, which converts it into an analog waveform. I specifically left $H_{out}R$ disconnected because we're dealing with mono sound. The DAC was wired up according to the [datasheet](docs/pcm1808.pdf) under the section "Application Information".
 2. At the DAC output, our signal is going to be centered at $1.65 V$, we send our signal through a capacitor to recenter it at $0 V$. Also, we use an RC high-pass filter to shunt the high frequency switching noise to ground.
