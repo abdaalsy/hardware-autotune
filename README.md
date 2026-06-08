@@ -85,6 +85,8 @@ Important:
 
 WIP
 
+Need LDOs for $3.3 V$ and $2.4 V$ rails.
+
 ## Ideas for the Future
 
 **May 26, 2026:** I'm considering adding more effects than just autotune, and enabling profile creation too. My friend also gave me a pretty good idea of printing this using TinyTapeout, it'd be sick to have my very own ASIC that I designed all on my own. 
