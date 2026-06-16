@@ -13,18 +13,17 @@ print("Audio data shape: " + str(audio.shape))
 print("Sample rate: " + str(sample_rate))
 print("Preview: " + str(audio[2000:]))
 
-# Apply pitch shift, listen to output to see if proper 
-shift = 1000.0 # Hz
-indices = np.arange(audio.size, dtype=np.float32)
+shift = 1.5     # TODO: Convert target frequency into a number to multiply fundamental freq by
+samples_to_copy = 5000  # The number of samples we take before we compress then copy,
 
-# Current time = sample index / sample rate
-cos_values = np.cos(shift*indices/sample_rate)
-sin_values = np.sin(shift*indices/sample_rate)
-shifted_audio = audio*(cos_values + sin_values)
+split_indices = range(0, len(audio), samples_to_copy)
+chunks = np.array_split(audio, split_indices)
+copied_chunks = [np.append(cluster, cluster[:samples_to_copy/shift]) for cluster in chunks]
 
 print("Shifted Preview: " + str(audio[2000:]))
 
 sf.write('output.wav', shifted_audio, sample_rate)
-print("Successfully saved to output.wav")
+print("Successfully saved to output.wav") 
+
 
     
