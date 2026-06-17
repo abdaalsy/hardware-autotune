@@ -19,3 +19,13 @@ So what we're going to do is from the beginning of my recording I'm gonna use th
 
 Now the question is if this works, can I think of another maybe better (or better in a different way) method?
 
+
+Update 2: Just finished implementing this new method and the output is definitely better. But I'm noticing that there are these weird jump cuts that happen many times per second. I had a feeling that this would happen, and I believe it stems from the phase difference between the end of the compressed wave, and the beginning of the copied wave. There's a couple options to make it sound right:
+
+- Check for a displacement difference and if its outside some tolerance, manually insert an interpolating line between the two points.
+- Again check for the displacement, and slide the copied waveform back until its aligned with the compressed one
+- Calculate the remaining piece of the wave (beginning phase to end phase) and insert it.
+
+The second method is simple, but there's already a small shortening of the duration my algorithm applies, I don't want to increase that. The first and third methods are both better I believe.
+
+Determining the tolerance will require info about the incoming wave's amplitude. Since all three methods will require this amplitude, I might as well go with the last one because it will give me the best output. The small wave simulation on top should not be an issue since the sampling rate is nowhere near the clock speed.
