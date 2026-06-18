@@ -3,6 +3,17 @@ import librosa
 import soundfile as sf
 import matplotlib.pyplot as plt
 import sys
+import argparse
+
+parser = argparse.ArgumentParser(description="Process data with chunks and shifts.")
+
+parser.add_argument("-c", "--chunk-size", type=int, help="Size of each data chunk")
+parser.add_argument("-s", "--shift", type=float, help="Shift amount value")
+parser.add_argument("--ov-frac", type=int, help="Overlap fraction value")
+parser.add_argument("-i", "--input", type=str, help="Path to the input file")
+parser.add_argument("-o", "--output", type=str, help="Path to the output file")
+
+args = parser.parse_args()
 
 def resample(arr, real_gap):
     resampled = []
@@ -19,11 +30,10 @@ def resample(arr, real_gap):
     return resampled
 
 def input_audio(path):
-    vocals = sys.argv[1]
-    audio, sample_rate = librosa.load(vocals, sr=None)
+    audio, sample_rate = librosa.load(path, sr=None)
 
     print("\n\n\n")
-    print("File: " + vocals)
+    print("File: " + path)
     print("Audio data shape: " + str(audio.shape))
     print("Sample rate: " + str(sample_rate))
     print("Preview: " + str(audio[2000:]))
@@ -33,7 +43,7 @@ def input_audio(path):
 def autotune(signal, sample_rate):
     # Compress and copy the samples
     shift = get_shift(get_freq(signal), -1)
-    samples_to_copy = 5000  # The number of samples we take before we compress then copy,
+    samples_to_copy = args.chunk_size  # The number of samples we take before we compress then copy,
 
     split_indices = range(samples_to_copy, len(signal), samples_to_copy)
     chunks = np.array_split(audio, split_indices)
@@ -51,7 +61,7 @@ def get_freq(signal):
     return -1
     
 def get_shift(freq, target):
-    return 1.2
+    return args.shift
 
 def pitch_shift(chunks, shift):
     """
@@ -61,7 +71,7 @@ def pitch_shift(chunks, shift):
         join into one chunk, move to next.
     """
     for i in range(len(chunks)):
-        len_overlap = int(len(chunks[i])/15)    # We can vary this to see what gives best output
+        len_overlap = int(len(chunks[i])/args.ov_frac)    # We can vary this to see what gives best output
         len_copy = len_overlap + int(len(chunks[i])*(shift - 1))     # Total copied length = overlap + piece of chunk
         copy_chunk = chunks[i][-len_copy:].copy() # The last len_copy number of elements of the current chunk
         chunks[i] = cross_fade(chunks[i].copy(), copy_chunk, len_overlap)
@@ -90,7 +100,7 @@ def output_audio(audio, sample_rate, path):
 def output_waveform(audio, sample_rate, path):
     x = np.linspace(0, len(audio)/sample_rate, len(audio))
 
-    plt.plot(x, audio, label="Vocals Waveform", color="green", alpha=0.8)
+    plt.plot(x, audio, label="Vocals Waveform", color="green", alpha=1)
 
     plt.title("Vocals Waveform")
     plt.xlabel("time")
@@ -103,9 +113,9 @@ def output_waveform(audio, sample_rate, path):
     print(f"Saved waveform to {path}")
 
 if __name__ == "__main__":
-    vocals_path = sys.argv[1]
-    output_audio_path = "output.wav"
-    output_waveform_path = "output.png"
+    vocals_path = args.input
+    output_audio_path = args.output
+    # output_waveform_path = "output.png"
     
     audio, sample_rate = input_audio(vocals_path)
     autotuned = autotune(audio, sample_rate)
