@@ -2,3 +2,4 @@ cocotb
 numpy
 librosa
 pydub
+matplotlib

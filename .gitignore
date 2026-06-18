@@ -3,3 +3,4 @@ fpga/build/
 .python-version
 vtr-verilog-to-routing/
 *.m4a
+*.wav

@@ -29,3 +29,7 @@ Update 2: Just finished implementing this new method and the output is definitel
 The second method is simple, but there's already a small shortening of the duration my algorithm applies, I don't want to increase that. The first and third methods are both better I believe.
 
 Determining the tolerance will require info about the incoming wave's amplitude. Since all three methods will require this amplitude, I might as well go with the last one because it will give me the best output. The small wave simulation on top should not be an issue since the sampling rate is nowhere near the clock speed.
+
+Update 3: I asked AI about the issue and it told me about crossfading. This is where you let the two clips overlap while simulatneosly decreasing one's volume and increasing the other to create a seamless transition. The thing is you can't just linearly decrease one and linearly increase the other, because sound volume is logarithmic. Two half volume audios added together is still 3 dB under the original volume. What we need is for the sums of the squares of the gains to always equal 1. We can easily produce this by using a cosine wave for one clip's gain, and a sine wave for the other. Since AI gave me the answer, I'll at least try to think of my own implementation. 
+
+Just finished implementing that and finally the output sounds almost perfect. The only thing is that there's still some tiny amount of like noise or something in the background which I gotta investigate. Maybe I can find a way to determine its frequency, and just filter it out?
