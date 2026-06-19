@@ -9,6 +9,7 @@ parser = argparse.ArgumentParser(description="Process data with chunks and shift
 
 parser.add_argument("-c", "--chunk-size", type=int, help="Size of each data chunk")
 parser.add_argument("-s", "--shift", type=float, help="Shift amount value")
+parser.add_argument("--cc-threshold", type=float, help="Normalized cross correlation threshold")
 parser.add_argument("--ov-frac", type=int, help="Overlap fraction value")
 parser.add_argument("-i", "--input", type=str, help="Path to the input file")
 parser.add_argument("-o", "--output", type=str, help="Path to the output file")
@@ -63,6 +64,18 @@ def get_freq(signal):
 def get_shift(freq, target):
     return args.shift
 
+def create_copy(chunk, shift):
+    # Determine the length of our copied chunk (including overlap)
+    # Slide our window until we see that the points have been matching (make the target score configurable)
+    # Copy that window and append it to the end of the chunk.
+    cc_threshold = args.cc
+    len_overlap = int(len(chunks)/args.ov_frac)    # We can vary this to see what gives best output
+    len_copy = len_overlap + int(len(chunks)*(shift - 1))     # Total copied length = overlap + piece of chunk
+    start = 0
+    while start < (len(chunk) - len_copy):
+        # Calculate normalized cross correlation
+        start += 1
+
 def pitch_shift(chunks, shift):
     """
     In a loop:
@@ -71,8 +84,6 @@ def pitch_shift(chunks, shift):
         join into one chunk, move to next.
     """
     for i in range(len(chunks)):
-        len_overlap = int(len(chunks[i])/args.ov_frac)    # We can vary this to see what gives best output
-        len_copy = len_overlap + int(len(chunks[i])*(shift - 1))     # Total copied length = overlap + piece of chunk
         copy_chunk = chunks[i][-len_copy:].copy() # The last len_copy number of elements of the current chunk
         chunks[i] = cross_fade(chunks[i].copy(), copy_chunk, len_overlap)
     
