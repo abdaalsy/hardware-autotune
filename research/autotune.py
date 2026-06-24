@@ -69,14 +69,14 @@ sample_rate = 44100
 input_buffer = np.zeros(shape=(args.buffer_size,), dtype=np.float32)
 output_buffer = np.zeros(shape=(block_size,), dtype=np.float32)
 read_pos = 0
-write_pos = read_pos + 16*block_size
+write_pos = read_pos + 8*block_size
 
 input_stream = stream_wav_file(args.input, chunk_size=block_size)
 
 def move_read_head():
-    pitch_indexes = np.arange(read_pos - 4096, read_pos, dtype=np.int32) % len(input_buffer) 
+    global read_pos, write_pos, output_buffer
+    pitch_indexes = np.arange(write_pos - len(input_buffer), write_pos, dtype=np.int32) % len(input_buffer) 
     pitch = detect_pitch(input_buffer[pitch_indexes]) or 1
-    # Determine nearest target frequency and get ratio (read head speed)
     speed = args.shift
     period_samples = int(1.0 / float(pitch) * sample_rate)
 
@@ -98,19 +98,20 @@ def move_read_head():
     read_pos %= len(input_buffer)
     
     if check_overtake(read_pos, write_pos, block_size, len(input_buffer)):
-        print("overrun " + str(period_samples))
-        read_pos -= period_samples
+        print("overrun")
+        print(pitch)
+        read_pos -= period_samples*block_size
         read_pos %= len(input_buffer)
     
     if check_overtake(write_pos, read_pos, block_size, len(input_buffer)):
-        print("underrun " + str(period_samples))
-        read_pos += period_samples
+        print("underrun")
+        print(pitch)
+        read_pos += period_samples*block_size
         read_pos %= len(input_buffer)
     
-    # Set outdata (which is actually an output passed by reference) to the output buffer
-    outdata[:] = output_buffer.reshape(block_size, 1)
 
 def move_write_head():
+    global write_pos
     # Will be called in a separate thread at sample_rate
     write_block = next(input_stream)
     write_indexes = np.arange(write_pos, write_pos + block_size, dtype=np.int32) % len(input_buffer)
@@ -120,17 +121,20 @@ def move_write_head():
 
 def audio_callback(outdata, frames, time_info, status):
     # This function is called by sounddevice in a separate background thread every time the audio buffer needs new data
-    outdata[:] = output_buffer
+    move_write_head()
+    move_read_head()
+    # Set outdata (which is actually an output passed by reference) to the output buffer
+    outdata[:] = output_buffer.reshape(block_size, 1)
 
 
 def detect_pitch(signal):
     # Auto correlation will always start high, then decrease, then increase, and then decrease again
     # We want the 2nd peak so we're gonna wait till we decrease a 2nd time
-    lag = 5
+    lag = 1
     auto_correl = np.dot(signal[-lag:], signal[-2*lag:-lag]) / lag
     prev_delta = -1     # Auto correlation starts off decreasing
-    while lag+5 < len(signal)/2:
-        lag += 5
+    while lag+1 < len(signal)/2:
+        lag += 1
         new_auto_correl = np.dot(signal[-lag:], signal[-2*lag:-lag]) / lag
         delta = new_auto_correl - auto_correl
         if prev_delta > 0 and delta < 0: # If we've reached a peak
