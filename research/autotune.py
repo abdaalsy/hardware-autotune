@@ -63,46 +63,39 @@ parser.add_argument("-b", "--buffer-size", type=int, help="Size of the circular 
 parser.add_argument("-s", "--shift", type=float, help="Shift amount value")
 args = parser.parse_args()
 
-block_size = 1024
+block_size = 8
 sample_rate = 44100
 
 input_buffer = np.zeros(shape=(args.buffer_size,), dtype=np.float32)
 output_buffer = np.zeros(shape=(block_size,), dtype=np.float32)
-write_pos = len(input_buffer) / 2
-read_pos = 0   
-real_read_pos = float(read_pos)
+read_pos = 0
+write_pos = read_pos + 16*block_size
 
 input_stream = stream_wav_file(args.input, chunk_size=block_size)
 
-def audio_callback(outdata, frames, time_info, status):
-    global read_pos, write_pos, real_read_pos
-    """
-    This function is called by sounddevice in a separate background thread every time the audio buffer needs new data
-    """
+def move_read_head():
     pitch_indexes = np.arange(read_pos - 4096, read_pos, dtype=np.int32) % len(input_buffer) 
     pitch = detect_pitch(input_buffer[pitch_indexes]) or 1
     # Determine nearest target frequency and get ratio (read head speed)
     speed = args.shift
     period_samples = int(1.0 / float(pitch) * sample_rate)
 
-    # Updating write_pos
-    block = next(input_stream)
-    indexes = np.arange(write_pos, write_pos + block_size, dtype=np.int32) % len(input_buffer)
-    input_buffer[indexes] = block
-    write_pos += block_size 
-    write_pos %= len(input_buffer)  # Circles back to beginning of buffer
-
-    # Updating read_pos
+    j = 0
+    k = j
+    read_indexes = np.zeros(shape=(block_size,), dtype=np.int32)
     for i in range(block_size):
-        output_buffer[i] = input_buffer[int(read_pos)]
-        read_pos += 1
-        real_read_pos += speed
-        if read_pos - real_read_pos >= 1:   # This happens when we are pitching down
-            read_pos -= 1
-        elif real_read_pos - read_pos >= -1: # This happens when we're pitching up
-            read_pos += 1
-        read_pos %= len(input_buffer)
-        real_read_pos %= len(input_buffer)
+        read_indexes[i] = read_pos + j
+        j += 1
+        k += speed
+        if speed > 1 and k-j >= 1.0:
+            j += 1
+        elif speed < 1 and j-k >= 1.0:
+            j -= 1
+    
+    read_indexes %= len(input_buffer)
+    output_buffer = input_buffer[read_indexes]
+    read_pos += j
+    read_pos %= len(input_buffer)
     
     if check_overtake(read_pos, write_pos, block_size, len(input_buffer)):
         print("overrun " + str(period_samples))
@@ -116,6 +109,19 @@ def audio_callback(outdata, frames, time_info, status):
     
     # Set outdata (which is actually an output passed by reference) to the output buffer
     outdata[:] = output_buffer.reshape(block_size, 1)
+
+def move_write_head():
+    # Will be called in a separate thread at sample_rate
+    write_block = next(input_stream)
+    write_indexes = np.arange(write_pos, write_pos + block_size, dtype=np.int32) % len(input_buffer)
+    input_buffer[write_indexes] = write_block
+    write_pos += block_size 
+    write_pos %= len(input_buffer)  # Circles back to beginning of buffer
+
+def audio_callback(outdata, frames, time_info, status):
+    # This function is called by sounddevice in a separate background thread every time the audio buffer needs new data
+    outdata[:] = output_buffer
+
 
 def detect_pitch(signal):
     # Auto correlation will always start high, then decrease, then increase, and then decrease again
