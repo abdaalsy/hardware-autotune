@@ -76,7 +76,7 @@ input_stream = stream_wav_file(args.input, chunk_size=block_size)
 def move_read_head():
     global read_pos, write_pos, output_buffer
     pitch_indexes = np.arange(write_pos - len(input_buffer), write_pos, dtype=np.int32) % len(input_buffer) 
-    pitch = detect_pitch(input_buffer[pitch_indexes]) or 1
+    pitch = detect_pitch(input_buffer[pitch_indexes])
     speed = args.shift
     period_samples = int(1.0 / float(pitch) * sample_rate)
 
@@ -126,24 +126,13 @@ def audio_callback(outdata, frames, time_info, status):
     # Set outdata (which is actually an output passed by reference) to the output buffer
     outdata[:] = output_buffer.reshape(block_size, 1)
 
-
 def detect_pitch(signal):
-    # Auto correlation will always start high, then decrease, then increase, and then decrease again
-    # We want the 2nd peak so we're gonna wait till we decrease a 2nd time
-    lag = 1
-    auto_correl = np.dot(signal[-lag:], signal[-2*lag:-lag]) / lag
-    prev_delta = -1     # Auto correlation starts off decreasing
-    while lag+1 < len(signal)/2:
-        lag += 1
-        new_auto_correl = np.dot(signal[-lag:], signal[-2*lag:-lag]) / lag
-        delta = new_auto_correl - auto_correl
-        if prev_delta > 0 and delta < 0: # If we've reached a peak
-            break
-        prev_delta = delta
-        auto_correl = new_auto_correl
-    # Once we've reached this point, lag should be the number of samples for one period
-    # That means freq = sample_rate/lag
-    return sample_rate/lag
+    # Our autotune is only as good as our pitch detection, so this better be accurate
+    pass
+
+def nearest_note(freq, key):
+    pass
+
 
 output_stream = sounddevice.OutputStream(samplerate=sample_rate, blocksize=block_size, channels=1, callback=audio_callback)
 
