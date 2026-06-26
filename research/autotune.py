@@ -59,8 +59,9 @@ def stream_wav_file(file_path, chunk_size=512):
 
 parser = argparse.ArgumentParser(description="Process data with chunks and shifts.")
 parser.add_argument("-i", "--input", default="vocals.wav", type=str, help="Input file path")
-parser.add_argument("-b", "--buffer-size", type=int, help="Size of the circular buffer")
-parser.add_argument("-s", "--shift", type=float, help="Shift amount value")
+parser.add_argument("-b", "--buffer-size", type=int, help="Size of the circular buffer", required=True)
+parser.add_argument("-s", "--shift", type=float, help="(DEBUG) Shift amount value")
+parser.add_argument("-k", "--key", type=str, help="Musical key. Options: [TODO]")
 args = parser.parse_args()
 
 block_size = 8
@@ -75,10 +76,14 @@ input_stream = stream_wav_file(args.input, chunk_size=block_size)
 
 def move_read_head():
     global read_pos, write_pos, output_buffer
-    pitch_indexes = np.arange(write_pos - len(input_buffer), write_pos, dtype=np.int32) % len(input_buffer) 
+    # Collect indexes of input buffer to use (downsampled to 5 kHz to reduce operations - roughly translates to taking every 8th sample)
+    pitch_indexes = np.arange(write_pos - len(input_buffer), write_pos, int(sample_rate/5000), dtype=np.int32) % len(input_buffer) 
     pitch = detect_pitch(input_buffer[pitch_indexes])
+    period_samples = 0
     speed = args.shift
-    period_samples = int(1.0 / float(pitch) * sample_rate)
+    if pitch:
+        period_samples = int(1.0 / float(pitch) * sample_rate)
+        print(pitch)
 
     j = 0
     k = j
@@ -98,14 +103,14 @@ def move_read_head():
     read_pos %= len(input_buffer)
     
     if check_overtake(read_pos, write_pos, block_size, len(input_buffer)):
-        print("overrun")
-        print(pitch)
+        # print("overrun")
+        # print(pitch)
         read_pos -= period_samples*block_size
         read_pos %= len(input_buffer)
     
     if check_overtake(write_pos, read_pos, block_size, len(input_buffer)):
-        print("underrun")
-        print(pitch)
+        # print("underrun")
+        # print(pitch)
         read_pos += period_samples*block_size
         read_pos %= len(input_buffer)
     
@@ -126,12 +131,36 @@ def audio_callback(outdata, frames, time_info, status):
     # Set outdata (which is actually an output passed by reference) to the output buffer
     outdata[:] = output_buffer.reshape(block_size, 1)
 
-def detect_pitch(signal):
+def detect_pitch(signal, epsilon=0.4):
     # Our autotune is only as good as our pitch detection, so this better be accurate
-    pass
+    lag = 1
+    asdf = 1
+    auto_correl = 0
+    square_sum = np.sum(signal[-2*lag:]*signal[-2*lag:])
+    while asdf > epsilon and lag < len(signal)/2:         # Anything above 0.4 is not periodic, means we should continue looking
+        lag += 1
+        square_sum += signal[-2*lag]**2 + signal[-2*lag + 1]**2     # Window grows by two elements every iteration
+        subset_a = signal[-2*lag:-lag]
+        subset_b = signal[-lag:]
+        auto_correl = np.sum(subset_a*subset_b)
+        asdf = square_sum - 2*auto_correl
 
-def nearest_note(freq, key):
-    pass
+    # Check harmonic because sometimes its even more periodic meaning we hear that pitch instead
+    harmonic_lag = 2*lag
+    if harmonic_lag <= len(signal)/2:        
+        square_sum += np.sum(signal[-2*harmonic_lag:-harmonic_lag]**2)
+        subset_a = signal[-2*harmonic_lag:-harmonic_lag]
+        subset_b = signal[-harmonic_lag:]
+        auto_correl = np.sum(subset_a*subset_b)
+        asdf2 = square_sum - 2*auto_correl
+        if asdf2 < asdf:
+            asdf = asdf2
+            lag = harmonic_lag
+    # convert lag into frequency (lag is the number of samples for 1 period)
+    if asdf <= epsilon: # and (1.0/(2.0*lag) * square_sum)**0.5 * 2**0.5 > 0.1:    # RMS ampltude of our signal must be greater than some minimum
+        return sample_rate/lag
+    else:
+        return -1   # we weren't able to find a periodic portion (rare)
 
 
 output_stream = sounddevice.OutputStream(samplerate=sample_rate, blocksize=block_size, channels=1, callback=audio_callback)
