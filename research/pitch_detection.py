@@ -1,15 +1,37 @@
 import sounddevice as sd
 import numpy as np
 import time
-
-SAMPLE_RATE = 44100
-BLOCK_SIZE = 1024  # Number of samples per chunk passed to the callback
 import numpy as np
 
-def yin_pitch_estimate(frame, fs, threshold=0.1, f_min=50, f_max=800):
-    W = len(frame)
-    tau_min = int(fs / f_max)   # lag can't be lower than max vocal frequency
-    tau_max = int(fs / f_min)   # lag also can't be higher than min vocal freq
+SAMPLE_RATE = 44100
+TAU_MIN = int(44100/800)
+TAU_MAX = 512+256+128   # close enough to int(44100/50)
+WINDOW_SIZE = 2048      # close enough to 2* int(44100/50). Larger is better
+BLOCK_SIZE = WINDOW_SIZE + TAU_MAX     # Number of samples per chunk passed to the callback
+
+def signal_energy(signal, length, W, new_lag, old_lag, reference_old):
+    lagged_energy = reference_old
+    lagged_energy -= np.sum(signal[length-new_lag:length-old_lag]**2)
+    lagged_energy += np.sum(signal[length-W-new_lag:length-W-old_lag]**2)
+    return lagged_energy
+
+def autocorrelation(signal, length):
+    pass
+
+def squared_difference(signal, length, W, tau_max):
+    d = np.zeros(tau_max)
+    reference_energy = np.sum(signal**2)
+    reference_old = reference_energy
+    auto_corr = autocorrelation(signal, W)  # indexes 0 to W-1 represent all possible positive lags
+    for tau in range(1, tau_max):
+        d[tau] = reference_energy + signal_energy(signal, length, W, tau, tau - 1, reference_old) - 2*auto_corr[tau]
+
+    return d
+
+def yin_pitch_estimate(frame, fs, threshold=0.1):
+    W = WINDOW_SIZE
+    tau_max = TAU_MAX
+    tau_min = TAU_MIN
    
     # For all different lags, calculate the difference between signal and time lagged samples, square each difference, then sum
     d = np.zeros(tau_max)
@@ -65,7 +87,6 @@ def audio_callback(indata, frames, time_info, status):
     'indata' is a numpy array of type float32 containing the mic samples.
     """
     # indata is your float32 array
-    # Calculate the root-mean-square (RMS) as a simple volume meter
     
     print(f"Pitch: {detect_pitch(indata.reshape(-1), SAMPLE_RATE)}", end="\r")
 
