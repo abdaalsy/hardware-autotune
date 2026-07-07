@@ -5,6 +5,13 @@ import numpy as np
 import argparse
 import sounddevice
 
+parser = argparse.ArgumentParser(description="Process data with chunks and shifts.")
+parser.add_argument("-i", "--input", default="vocals.wav", type=str, help="Input file path")
+parser.add_argument("-b", "--buffer-size", type=int, help="Size of the circular buffer", required=True)
+parser.add_argument("-s", "--shift", type=float, help="(DEBUG) Shift amount value")
+parser.add_argument("-k", "--key", type=str, help="Musical key. Options: [TODO]")
+args = parser.parse_args()
+
 def check_overtake(pointer1, pointer2, jump_size, buffer_length):
     # Returns true if pointer1 is about to overtake pointer2 after stepping forward jump_size elements in a circular buffer of length buffer_length
     
@@ -57,12 +64,6 @@ def stream_wav_file(file_path, chunk_size=512):
             yield float_data
 
 
-parser = argparse.ArgumentParser(description="Process data with chunks and shifts.")
-parser.add_argument("-i", "--input", default="vocals.wav", type=str, help="Input file path")
-parser.add_argument("-b", "--buffer-size", type=int, help="Size of the circular buffer", required=True)
-parser.add_argument("-s", "--shift", type=float, help="(DEBUG) Shift amount value")
-parser.add_argument("-k", "--key", type=str, help="Musical key. Options: [TODO]")
-args = parser.parse_args()
 
 block_size = 8
 sample_rate = 44100
@@ -134,28 +135,18 @@ def audio_callback(outdata, frames, time_info, status):
 def detect_pitch(signal, epsilon=0.4):
     # Our autotune is only as good as our pitch detection, so this better be accurate
     lag = 1
-    asdf = 1
-    auto_correl = 0
-    square_sum = np.sum(signal[-2*lag:]*signal[-2*lag:])
+    asdf = 1.0
+    auto_correl = 0.0
+    square_sum = float(np.sum(signal[-2*lag:]**2))
     while asdf > epsilon and lag < len(signal)/2:         # Anything above 0.4 is not periodic, means we should continue looking
         lag += 1
         square_sum += signal[-2*lag]**2 + signal[-2*lag + 1]**2     # Window grows by two elements every iteration
         subset_a = signal[-2*lag:-lag]
         subset_b = signal[-lag:]
-        auto_correl = np.sum(subset_a*subset_b)
+        auto_correl = float(np.sum(subset_a*subset_b))
         asdf = square_sum - 2*auto_correl
+        print(asdf)
 
-    # Check harmonic because sometimes its even more periodic meaning we hear that pitch instead
-    harmonic_lag = 2*lag
-    if harmonic_lag <= len(signal)/2:        
-        square_sum += np.sum(signal[-2*harmonic_lag:-harmonic_lag]**2)
-        subset_a = signal[-2*harmonic_lag:-harmonic_lag]
-        subset_b = signal[-harmonic_lag:]
-        auto_correl = np.sum(subset_a*subset_b)
-        asdf2 = square_sum - 2*auto_correl
-        if asdf2 < asdf:
-            asdf = asdf2
-            lag = harmonic_lag
     # convert lag into frequency (lag is the number of samples for 1 period)
     if asdf <= epsilon: # and (1.0/(2.0*lag) * square_sum)**0.5 * 2**0.5 > 0.1:    # RMS ampltude of our signal must be greater than some minimum
         return sample_rate/lag
