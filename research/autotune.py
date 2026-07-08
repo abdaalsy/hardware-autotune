@@ -4,13 +4,19 @@ import sys
 import numpy as np
 import argparse
 import sounddevice
+from pitch_detection import detect_pitch
 
 parser = argparse.ArgumentParser(description="Process data with chunks and shifts.")
 parser.add_argument("-i", "--input", default="vocals.wav", type=str, help="Input file path")
-parser.add_argument("-b", "--buffer-size", type=int, help="Size of the circular buffer", required=True)
 parser.add_argument("-s", "--shift", type=float, help="(DEBUG) Shift amount value")
 parser.add_argument("-k", "--key", type=str, help="Musical key. Options: [TODO]")
 args = parser.parse_args()
+
+SAMPLE_RATE = 48000
+TAU_MIN = int(48000/800)
+TAU_MAX = 1024   # close enough to int(48000/50)
+WINDOW_SIZE = 2048      # close enough to 2* int(44100/50). Larger is better
+BLOCK_SIZE = WINDOW_SIZE + TAU_MAX     # Number of samples per chunk passed to the callback
 
 def check_overtake(pointer1, pointer2, jump_size, buffer_length):
     # Returns true if pointer1 is about to overtake pointer2 after stepping forward jump_size elements in a circular buffer of length buffer_length
@@ -64,32 +70,26 @@ def stream_wav_file(file_path, chunk_size=512):
             yield float_data
 
 
-
-block_size = 8
-sample_rate = 44100
-
-input_buffer = np.zeros(shape=(args.buffer_size,), dtype=np.float32)
-output_buffer = np.zeros(shape=(block_size,), dtype=np.float32)
+input_buffer = np.zeros(shape=(BLOCK_SIZE,), dtype=np.float32)
+output_buffer = np.zeros(shape=(BLOCK_SIZE,), dtype=np.float32)
 read_pos = 0
-write_pos = read_pos + 8*block_size
-
-input_stream = stream_wav_file(args.input, chunk_size=block_size)
+write_pos = read_pos + BLOCK_SIZE/2
+input_stream = stream_wav_file(args.input, chunk_size=BLOCK_SIZE)
 
 def move_read_head():
     global read_pos, write_pos, output_buffer
     # Collect indexes of input buffer to use (downsampled to 5 kHz to reduce operations - roughly translates to taking every 8th sample)
-    pitch_indexes = np.arange(write_pos - len(input_buffer), write_pos, int(sample_rate/5000), dtype=np.int32) % len(input_buffer) 
-    pitch = detect_pitch(input_buffer[pitch_indexes])
+    pitch_indexes = np.arange(write_pos - BLOCK_SIZE, write_pos, dtype=np.int32) % len(input_buffer) 
+    pitch = detect_pitch(input_buffer, SAMPLE_RATE, WINDOW_SIZE, TAU_MAX, TAU_MIN)
     period_samples = 0
     speed = args.shift
     if pitch:
-        period_samples = int(1.0 / float(pitch) * sample_rate)
-        print(pitch)
+        period_samples = int(1.0 / float(pitch) * SAMPLE_RATE)
 
     j = 0
     k = j
-    read_indexes = np.zeros(shape=(block_size,), dtype=np.int32)
-    for i in range(block_size):
+    read_indexes = np.zeros(shape=(BLOCK_SIZE,), dtype=np.int32)
+    for i in range(BLOCK_SIZE):
         read_indexes[i] = read_pos + j
         j += 1
         k += speed
@@ -102,27 +102,27 @@ def move_read_head():
     output_buffer = input_buffer[read_indexes]
     read_pos += j
     read_pos %= len(input_buffer)
+    print(read_pos)
     
-    if check_overtake(read_pos, write_pos, block_size, len(input_buffer)):
-        # print("overrun")
+    if check_overtake(read_pos, write_pos, BLOCK_SIZE, len(input_buffer)):
+        print("overrun")
         # print(pitch)
-        read_pos -= period_samples*block_size
+        read_pos -= period_samples*BLOCK_SIZE
         read_pos %= len(input_buffer)
     
-    if check_overtake(write_pos, read_pos, block_size, len(input_buffer)):
-        # print("underrun")
+    if check_overtake(write_pos, read_pos, BLOCK_SIZE, len(input_buffer)):
+        print("underrun")
         # print(pitch)
-        read_pos += period_samples*block_size
+        read_pos += period_samples*BLOCK_SIZE
         read_pos %= len(input_buffer)
-    
 
 def move_write_head():
     global write_pos
     # Will be called in a separate thread at sample_rate
     write_block = next(input_stream)
-    write_indexes = np.arange(write_pos, write_pos + block_size, dtype=np.int32) % len(input_buffer)
+    write_indexes = np.arange(write_pos, write_pos + BLOCK_SIZE, dtype=np.int32) % len(input_buffer)
     input_buffer[write_indexes] = write_block
-    write_pos += block_size 
+    write_pos += BLOCK_SIZE 
     write_pos %= len(input_buffer)  # Circles back to beginning of buffer
 
 def audio_callback(outdata, frames, time_info, status):
@@ -130,31 +130,7 @@ def audio_callback(outdata, frames, time_info, status):
     move_write_head()
     move_read_head()
     # Set outdata (which is actually an output passed by reference) to the output buffer
-    outdata[:] = output_buffer.reshape(block_size, 1)
-
-def detect_pitch(signal, epsilon=0.4):
-    # Our autotune is only as good as our pitch detection, so this better be accurate
-    lag = 1
-    asdf = 1.0
-    auto_correl = 0.0
-    square_sum = float(np.sum(signal[-2*lag:]**2))
-    while asdf > epsilon and lag < len(signal)/2:         # Anything above 0.4 is not periodic, means we should continue looking
-        lag += 1
-        square_sum += signal[-2*lag]**2 + signal[-2*lag + 1]**2     # Window grows by two elements every iteration
-        subset_a = signal[-2*lag:-lag]
-        subset_b = signal[-lag:]
-        auto_correl = float(np.sum(subset_a*subset_b))
-        asdf = square_sum - 2*auto_correl
-        print(asdf)
-
-    # convert lag into frequency (lag is the number of samples for 1 period)
-    if asdf <= epsilon: # and (1.0/(2.0*lag) * square_sum)**0.5 * 2**0.5 > 0.1:    # RMS ampltude of our signal must be greater than some minimum
-        return sample_rate/lag
-    else:
-        return -1   # we weren't able to find a periodic portion (rare)
-
-
-output_stream = sounddevice.OutputStream(samplerate=sample_rate, blocksize=block_size, channels=1, callback=audio_callback)
+    outdata[:] = output_buffer.reshape(BLOCK_SIZE, 1)
 
 def circular_slice(arr, start_idx, length):
     indices = np.arange(start_idx, start_idx + length)
@@ -163,6 +139,7 @@ def circular_slice(arr, start_idx, length):
         return arr[circular_indices[0]]
     return arr[circular_indices]
 
+output_stream = sounddevice.OutputStream(samplerate=SAMPLE_RATE, blocksize=BLOCK_SIZE, channels=1, callback=audio_callback)
 
 print("Playing real-time audio... Press Ctrl+C to stop.")
 try:

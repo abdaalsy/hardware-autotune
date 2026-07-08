@@ -1,13 +1,4 @@
-import sounddevice as sd
 import numpy as np
-import time
-import numpy as np
-
-SAMPLE_RATE = 44100
-TAU_MIN = int(44100/800)
-TAU_MAX = 512+256+128   # close enough to int(44100/50)
-WINDOW_SIZE = 2048      # close enough to 2* int(44100/50). Larger is better
-BLOCK_SIZE = WINDOW_SIZE + TAU_MAX     # Number of samples per chunk passed to the callback
 
 def signal_energy(signal, length, W, new_lag, old_lag, reference_old):
     lagged_energy = reference_old
@@ -39,10 +30,8 @@ def cmndf(d, tau_max):
     
     return d_prime
 
-def optimized_yin(frame, fs, threshold=0.1):
-    W = WINDOW_SIZE
-    tau_max = TAU_MAX
-    tau_min = TAU_MIN
+def optimized_yin(frame, fs, window_size, tau_max, tau_min, threshold=0.1):
+    W = window_size
     length = len(frame)
 
     d = squared_difference(frame, length, W, tau_max)
@@ -129,31 +118,5 @@ def yin_pitch_estimate(frame, fs, threshold=0.1):
 
     return fs / chosen_tau
 
-def detect_pitch(signal, sample_rate):
-    return optimized_yin(signal, SAMPLE_RATE)
-
-def audio_callback(indata, frames, time_info, status):
-    """
-    This function is called for every block of audio samples.
-    'indata' is a numpy array of type float32 containing the mic samples.
-    """
-    # indata is your float32 array
-    
-    print(f"Pitch: {detect_pitch(indata.reshape(-1), SAMPLE_RATE)}", end="\r")
-
-# Open the microphone input stream
-stream = sd.InputStream(
-    samplerate=SAMPLE_RATE,
-    channels=1,
-    dtype='float32',
-    blocksize=BLOCK_SIZE,
-    callback=audio_callback
-)
-
-print("Starting continuous stream. Press Ctrl+C to stop.")
-with stream:
-    try:
-        while True:
-            time.sleep(0.1)
-    except KeyboardInterrupt:
-        print("\nStream stopped.")
+def detect_pitch(signal, sample_rate, window_size, tau_max, tau_min):
+    return optimized_yin(signal, sample_rate, window_size, tau_max, tau_min)
