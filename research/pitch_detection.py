@@ -118,5 +118,5 @@ def yin_pitch_estimate(frame, fs, threshold=0.1):
 
     return fs / chosen_tau
 
-def detect_pitch(signal, sample_rate, window_size, tau_max, tau_min):
-    return optimized_yin(signal, sample_rate, window_size, tau_max, tau_min)
+def detect_pitch(signal, sample_rate, window_size, tau_max, tau_min, threshold=0.1):
+    return optimized_yin(signal, sample_rate, window_size, tau_max, tau_min, threshold)
