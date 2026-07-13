@@ -5,7 +5,7 @@ import numpy as np
 import argparse
 import sounddevice
 from pitch_detection import detect_pitch
-from note_matching import nearest_note
+from note_matching import find_nearest_note, generate_freq_table
 
 def stream_wav_file(file_path, chunk_size=512):
     # Open the WAV file
@@ -49,16 +49,17 @@ def stream_wav_file(file_path, chunk_size=512):
 
 parser = argparse.ArgumentParser(description="Process data with chunks and shifts.")
 parser.add_argument("-i", "--input", default="vocals.wav", type=str, help="Input file path")
-parser.add_argument("-s", "--shift", type=float, help="(DEBUG) Shift amount value")
+parser.add_argument("-k", "--key", required=True, type=str, help="The musical key (ex. \"C major\")")
 args = parser.parse_args()
 
 SAMPLE_RATE = 48000
-TAU_MIN = int(48000/800)
-TAU_MAX = 1024   # close enough to int(48000/50)
+TAU_MIN = int(SAMPLE_RATE/800)
+TAU_MAX = int(SAMPLE_RATE/50)
 WINDOW_SIZE = 2048      # close enough to 2* int(48000/50). Larger is better
-BLOCK_SIZE = 2048 
+BLOCK_SIZE = 1024 
 IN_BUFFER_LEN = 8192
-THRESHOLD_PITCH = 0.15
+THRESHOLD_PITCH = 0.1
+FREQ_TABLE = generate_freq_table(args.key.split()[0], args.key.split()[1], 800)
 
 input_stream = stream_wav_file(args.input, BLOCK_SIZE)
 input_buffer = np.zeros(IN_BUFFER_LEN)
@@ -104,7 +105,8 @@ def read_head():
 
     
     # Write to output buffer, stepping read head
-    shift = args.shift
+    shift = find_nearest_note(pitch, FREQ_TABLE) / pitch
+    print(shift)
     read_indexes = np.zeros(len(output_buffer), dtype=np.int32)
     real_read_pos = read_pos
     for k in range(len(read_indexes)):

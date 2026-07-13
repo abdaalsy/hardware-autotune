@@ -10,6 +10,10 @@ import sys
 # If we're supplied with a key, we should assemble a cache with all the notes for that key for as many octaves that fit in the range
 
 def generate_freq_table(root_note, major, max_hz):
+    is_major = True
+    if major.lower() == "minor":
+        is_major = False
+
     FREQ_MINS = {
         "C": 32.70,
         "CS": 34.65,
@@ -38,7 +42,7 @@ def generate_freq_table(root_note, major, max_hz):
         if i > 6:
             i = 0   # We could also % by 7 but I think thats more work, however it looks simpler
         table.append(current_freq)
-        if major:
+        if is_major:
             current_freq *= MAJOR_JUMPS[i]
         else:
             current_freq *= MINOR_JUMPS[i]
@@ -51,7 +55,6 @@ def find_nearest_note(freq, table):
     start = 0
     end = len(table)-1
     while abs(start - end) > 1:
-        print(f"({start}, {end})")
         mid = int((start + end)/2)
         if freq >= table[mid]:
             start = mid
@@ -68,6 +71,6 @@ def find_nearest_note(freq, table):
         return table[start]
 
 if __name__ == "__main__":
-    table = generate_freq_table(sys.argv[1], sys.argv[2].lower() == "major", 800)
+    table = generate_freq_table(sys.argv[1], sys.argv[2], 800)
     print(find_nearest_note(100, table))
 
