@@ -55,11 +55,14 @@ args = parser.parse_args()
 SAMPLE_RATE = 48000
 TAU_MIN = int(SAMPLE_RATE/800)
 TAU_MAX = int(SAMPLE_RATE/50)
-WINDOW_SIZE = 2048      # close enough to 2* int(48000/50). Larger is better
+WINDOW_SIZE = int(SAMPLE_RATE/50)      # close enough to 2* int(48000/50). Larger is better
 BLOCK_SIZE = 1024 
 IN_BUFFER_LEN = 8192
 THRESHOLD_PITCH = 0.1
 FREQ_TABLE = generate_freq_table(args.key.split()[0], args.key.split()[1], 800)
+print("Frequency table for " + args.key + "\n------------------------")
+print(FREQ_TABLE)
+print("------------------------")
 
 input_stream = stream_wav_file(args.input, BLOCK_SIZE)
 input_buffer = np.zeros(IN_BUFFER_LEN)
@@ -100,13 +103,16 @@ def read_head():
     pitch_indexes = np.arange(write_pos, write_pos + len(input_buffer), dtype=np.int32) % len(input_buffer)
     pitch = detect_pitch(input_buffer[pitch_indexes], SAMPLE_RATE, WINDOW_SIZE, TAU_MAX, TAU_MIN, THRESHOLD_PITCH)
     if not pitch:
+        pitch = old_pitch
+        print("SILENCE: ", end="")
+    if not pitch:
         pitch = 150
     period_samples = SAMPLE_RATE / pitch
 
     
     # Write to output buffer, stepping read head
     shift = find_nearest_note(pitch, FREQ_TABLE) / pitch
-    print(shift)
+    print(pitch)
     read_indexes = np.zeros(len(output_buffer), dtype=np.int32)
     real_read_pos = read_pos
     for k in range(len(read_indexes)):
