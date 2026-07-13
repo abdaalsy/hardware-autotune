@@ -5,6 +5,7 @@ import numpy as np
 import argparse
 import sounddevice
 from pitch_detection import detect_pitch
+from note_matching import nearest_note
 
 def stream_wav_file(file_path, chunk_size=512):
     # Open the WAV file
@@ -51,19 +52,20 @@ parser.add_argument("-i", "--input", default="vocals.wav", type=str, help="Input
 parser.add_argument("-s", "--shift", type=float, help="(DEBUG) Shift amount value")
 args = parser.parse_args()
 
-SAMPLE_RATE = 44100
-TAU_MIN = int(44100/800)
-TAU_MAX = 1024   # close enough to int(44100/50)
-WINDOW_SIZE = 2048      # close enough to 2* int(44100/50). Larger is better
+SAMPLE_RATE = 48000
+TAU_MIN = int(48000/800)
+TAU_MAX = 1024   # close enough to int(48000/50)
+WINDOW_SIZE = 2048      # close enough to 2* int(48000/50). Larger is better
 BLOCK_SIZE = 2048 
-IN_BUFFER_LEN = 4096*2
-THRESHOLD_PITCH = 0.1
+IN_BUFFER_LEN = 8192
+THRESHOLD_PITCH = 0.15
 
 input_stream = stream_wav_file(args.input, BLOCK_SIZE)
 input_buffer = np.zeros(IN_BUFFER_LEN)
 output_buffer = np.zeros(BLOCK_SIZE)
 read_pos = 0
 write_pos = read_pos + BLOCK_SIZE
+old_pitch = 0
 
 def check_overtake(pointer1, pointer2, jump_size, buffer_length):
     # Returns true if pointer1 is about to overtake pointer2 after stepping forward jump_size elements in a circular buffer of length buffer_length
@@ -92,14 +94,14 @@ def write_head():
     write_pos %= len(input_buffer)
 
 def read_head():
-    global read_pos, output_buffer
+    global read_pos, output_buffer, old_pitch
     # Get the pitch from the current write_pos going back
     pitch_indexes = np.arange(write_pos, write_pos + len(input_buffer), dtype=np.int32) % len(input_buffer)
     pitch = detect_pitch(input_buffer[pitch_indexes], SAMPLE_RATE, WINDOW_SIZE, TAU_MAX, TAU_MIN, THRESHOLD_PITCH)
-    period_samples = SAMPLE_RATE / 160
-    if pitch:
-        period_samples = SAMPLE_RATE / pitch
-    print(pitch)
+    if not pitch:
+        pitch = 150
+    period_samples = SAMPLE_RATE / pitch
+
     
     # Write to output buffer, stepping read head
     shift = args.shift
@@ -117,17 +119,17 @@ def read_head():
         real_read_pos %= len(input_buffer)
         if check_overtake(read_pos, write_pos, 2, len(input_buffer)):
             read_pos -= period_samples
-            real_read_pos -= period_samples*shift
+            real_read_pos -= period_samples
             read_pos %= len(input_buffer)
             real_read_pos %= len(input_buffer)
         elif check_overtake(write_pos, read_pos, BLOCK_SIZE, len(input_buffer)):
             read_pos += period_samples
-            real_read_pos += period_samples*shift
+            real_read_pos += period_samples
             read_pos %= len(input_buffer)
             real_read_pos %= len(input_buffer)
 
     output_buffer = input_buffer[read_indexes]
-    return pitch
+    old_pitch = pitch
 
 def audio_callback(outdata, frames, time_info, status):
     # This function is called by sounddevice in a separate background thread every time the audio buffer needs new data
