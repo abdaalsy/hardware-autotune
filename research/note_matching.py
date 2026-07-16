@@ -9,9 +9,9 @@ import sys
 # Human voice ranges from 50-800 Hz. That's from G1 to A5, 
 # If we're supplied with a key, we should assemble a cache with all the notes for that key for as many octaves that fit in the range
 
-def generate_freq_table(root_note, major, max_hz):
+def generate_freq_table(key, scale, max_hz, chromatic):
     is_major = True
-    if major.lower() == "minor":
+    if scale.lower() == "minor":
         is_major = False
 
     FREQ_MINS = {
@@ -36,17 +36,24 @@ def generate_freq_table(root_note, major, max_hz):
     MINOR_JUMPS = [W_RATIO, H_RATIO, W_RATIO, W_RATIO, H_RATIO, W_RATIO, W_RATIO]
     
     table = []
-    current_freq = FREQ_MINS[root_note]
+    if chromatic:
+        current_freq = FREQ_MINS["C"]
+    else:
+        current_freq = FREQ_MINS[key]
     i = 0
     while current_freq < max_hz:
-        if i > 6:
-            i = 0   # We could also % by 7 but I think thats more work, however it looks simpler
-        table.append(current_freq)
-        if is_major:
-            current_freq *= MAJOR_JUMPS[i]
+        if chromatic:
+            table.append(current_freq)
+            current_freq *= H_RATIO
         else:
-            current_freq *= MINOR_JUMPS[i]
-        i += 1
+            if i > 6:
+                i = 0   # We could also % by 7 but I think thats more work, however it looks simpler
+            table.append(current_freq)
+            if is_major:
+                current_freq *= MAJOR_JUMPS[i]
+            else:
+                current_freq *= MINOR_JUMPS[i]
+            i += 1
 
     return table
 

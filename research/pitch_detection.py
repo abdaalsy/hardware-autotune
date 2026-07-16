@@ -38,12 +38,13 @@ def optimized_yin(frame, fs, window_size, tau_max, tau_min, threshold=0.1):
     d_prime = cmndf(d, tau_max)
 
     # Run through till we find the first LOCAL MIN with a vlaue under the threshold
-    min_tau = 1
+    min_tau = tau_min
     chosen_tau = None
     for tau in range(tau_min, tau_max - 1):
+        if d_prime[tau] < d_prime[min_tau]:
+            min_tau = tau
+
         if d_prime[tau] < threshold:
-            if d_prime[tau] < d_prime[min_tau]:
-                min_tau = tau
             # Check if it's a local minimum
             if d_prime[tau] < d_prime[tau-1] and d_prime[tau] < d_prime[tau+1]:
                 chosen_tau = tau

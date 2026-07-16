@@ -49,18 +49,21 @@ def stream_wav_file(file_path, chunk_size=512):
 
 parser = argparse.ArgumentParser(description="Process data with chunks and shifts.")
 parser.add_argument("-i", "--input", default="vocals.wav", type=str, help="Input file path")
-parser.add_argument("-k", "--key", required=True, type=str, help="The musical key (ex. \"C major\")")
+parser.add_argument("-k", "--key", type=str, help="The musical key (ex. \"C major\")")
+parser.add_argument("-c", "--chromatic", type=bool, help="Whether or not to use the chromatic scale.")
 args = parser.parse_args()
 
 SAMPLE_RATE = 48000
 TAU_MIN = int(SAMPLE_RATE/800)
 TAU_MAX = int(SAMPLE_RATE/50)
 WINDOW_SIZE = int(SAMPLE_RATE/50)      # close enough to 2* int(48000/50). Larger is better
-BLOCK_SIZE = 1024 
+BLOCK_SIZE = 2048 
 IN_BUFFER_LEN = 8192
 THRESHOLD_PITCH = 0.1
-FREQ_TABLE = generate_freq_table(args.key.split()[0], args.key.split()[1], 800)
-print("Frequency table for " + args.key + "\n------------------------")
+# TODO: Track last N read samples to be used for pitch_detection, cus rn we use the last N written samples
+
+FREQ_TABLE = generate_freq_table("" if args.chromatic else args.key.split()[0], "" if args.chromatic else args.key.split()[1], 800, args.chromatic)
+print("Frequency table for " + "chromatic scale" if args.chromatic else args.key + "\n------------------------")
 print(FREQ_TABLE)
 print("------------------------")
 
@@ -112,7 +115,7 @@ def read_head():
     
     # Write to output buffer, stepping read head
     shift = find_nearest_note(pitch, FREQ_TABLE) / pitch
-    print(pitch)
+    print(shift)
     read_indexes = np.zeros(len(output_buffer), dtype=np.int32)
     real_read_pos = read_pos
     for k in range(len(read_indexes)):
