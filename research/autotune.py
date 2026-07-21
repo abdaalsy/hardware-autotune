@@ -57,22 +57,18 @@ SAMPLE_RATE = 48000
 TAU_MIN = int(SAMPLE_RATE/800)
 TAU_MAX = int(SAMPLE_RATE/50)
 WINDOW_SIZE = int(SAMPLE_RATE/50)      # close enough to 2* int(48000/50). Larger is better
-BLOCK_SIZE = 2048 
+BLOCK_SIZE = 2048
 IN_BUFFER_LEN = 8192
 THRESHOLD_PITCH = 0.1
-# TODO: Track last N read samples to be used for pitch_detection, cus rn we use the last N written samples
-
 FREQ_TABLE = generate_freq_table("" if args.chromatic else args.key.split()[0], "" if args.chromatic else args.key.split()[1], 800, args.chromatic)
-print("Frequency table for " + "chromatic scale" if args.chromatic else args.key + "\n------------------------")
-print(FREQ_TABLE)
-print("------------------------")
 
 input_stream = stream_wav_file(args.input, BLOCK_SIZE)
 input_buffer = np.zeros(IN_BUFFER_LEN)
 output_buffer = np.zeros(BLOCK_SIZE)
+pitch_buffer = np.zeros(WINDOW_SIZE + TAU_MAX)
 read_pos = 0
 write_pos = read_pos + BLOCK_SIZE
-old_pitch = 0
+old_pitch = [0 for i in range(9)]
 
 def check_overtake(pointer1, pointer2, jump_size, buffer_length):
     # Returns true if pointer1 is about to overtake pointer2 after stepping forward jump_size elements in a circular buffer of length buffer_length
@@ -101,46 +97,54 @@ def write_head():
     write_pos %= len(input_buffer)
 
 def read_head():
-    global read_pos, output_buffer, old_pitch
-    # Get the pitch from the current write_pos going back
-    pitch_indexes = np.arange(write_pos, write_pos + len(input_buffer), dtype=np.int32) % len(input_buffer)
-    pitch = detect_pitch(input_buffer[pitch_indexes], SAMPLE_RATE, WINDOW_SIZE, TAU_MAX, TAU_MIN, THRESHOLD_PITCH)
-    if not pitch:
-        pitch = old_pitch
-        print("SILENCE: ", end="")
+    global read_pos, output_buffer, pitch_buffer, old_pitch
+    pitch = detect_pitch(pitch_buffer, SAMPLE_RATE, WINDOW_SIZE, TAU_MAX, TAU_MIN, THRESHOLD_PITCH)
+    del old_pitch[0]
+    old_pitch.append(pitch)
+    sorted_pitches = sorted(old_pitch)
+    pitch = sorted_pitches[int(len(sorted_pitches)/2)]
     if not pitch:
         pitch = 150
     period_samples = SAMPLE_RATE / pitch
-
-    
+ 
     # Write to output buffer, stepping read head
     shift = find_nearest_note(pitch, FREQ_TABLE) / pitch
-    print(shift)
+    print(pitch)
+
     read_indexes = np.zeros(len(output_buffer), dtype=np.int32)
     real_read_pos = read_pos
-    for k in range(len(read_indexes)):
-        read_indexes[k] = read_pos 
-        read_pos += 1
-        real_read_pos += shift
-        if shift > 1 and real_read_pos-read_pos >= 1:
+    pitch_read_pos = read_pos
+    for k in range(max(BLOCK_SIZE, len(pitch_buffer))):
+        if k < len(pitch_buffer):
+            pitch_buffer[k] = input_buffer[int(pitch_read_pos)]
+            if check_overtake(write_pos, pitch_read_pos, 1, len(input_buffer)):
+                pitch_read_pos += period_samples
+            pitch_read_pos -= 1
+            pitch_read_pos %= len(input_buffer)
+
+        if k < len(read_indexes):
+            read_indexes[k] = read_pos 
             read_pos += 1
-        elif shift < 1 and read_pos-real_read_pos >= 1:
-            read_pos -= 1
-        read_pos %= len(input_buffer)
-        real_read_pos %= len(input_buffer)
-        if check_overtake(read_pos, write_pos, 2, len(input_buffer)):
-            read_pos -= period_samples
-            real_read_pos -= period_samples
+            real_read_pos += shift
+            if shift > 1 and real_read_pos-read_pos >= 1:
+                read_pos += 1
+            elif shift < 1 and read_pos-real_read_pos >= 1:
+                read_pos -= 1
+
             read_pos %= len(input_buffer)
             real_read_pos %= len(input_buffer)
-        elif check_overtake(write_pos, read_pos, BLOCK_SIZE, len(input_buffer)):
-            read_pos += period_samples
-            real_read_pos += period_samples
-            read_pos %= len(input_buffer)
-            real_read_pos %= len(input_buffer)
+            if check_overtake(read_pos, write_pos, 2, len(input_buffer)):
+                read_pos -= period_samples
+                real_read_pos -= period_samples
+                read_pos %= len(input_buffer)
+                real_read_pos %= len(input_buffer)
+            elif check_overtake(write_pos, read_pos, BLOCK_SIZE, len(input_buffer)):
+                read_pos += period_samples
+                real_read_pos += period_samples
+                read_pos %= len(input_buffer)
+                real_read_pos %= len(input_buffer)
 
     output_buffer = input_buffer[read_indexes]
-    old_pitch = pitch
 
 def audio_callback(outdata, frames, time_info, status):
     # This function is called by sounddevice in a separate background thread every time the audio buffer needs new data
