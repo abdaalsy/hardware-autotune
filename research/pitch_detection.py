@@ -47,7 +47,7 @@ def bandpass(data, lowcut, highcut, fs, order=5):
     
     return filtered_data
 
-def optimized_yin(frame, fs, window_size, tau_max, tau_min, threshold=0.1):
+def optimized_yin(frame, fs, window_size, tau_max, tau_min, threshold=0.8):
     W = window_size
     length = len(frame)
 

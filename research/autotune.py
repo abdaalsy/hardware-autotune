@@ -59,19 +59,18 @@ F_MIN = 50
 F_MAX = 800
 TAU_MIN = int(SAMPLE_RATE/F_MAX)
 TAU_MAX = int(SAMPLE_RATE/F_MIN)
-BLOCK_SIZE = 512
+BLOCK_SIZE = 128
 FRAME_WIDTH = int(2*SAMPLE_RATE/F_MIN)   # in number of samples
 WINDOW_SIZE = int(SAMPLE_RATE/F_MIN)
 FREQ_TABLE = generate_freq_table("" if args.chromatic else args.key.split()[0], "" if args.chromatic else args.key.split()[1], F_MAX, args.chromatic)
 
 past_pitches = [0 for i in range(5)]
-input_buffer = np.zeros(shape=(BLOCK_SIZE*32,), dtype=np.float32)
+input_buffer = np.zeros(shape=(BLOCK_SIZE*16,), dtype=np.float32)
 input_stream = stream_wav_file(args.input, BLOCK_SIZE)
 read_pos = 0
-write_pos = read_pos + BLOCK_SIZE*8
+write_pos = read_pos + 4*BLOCK_SIZE
 
 RATE_PITCH_DETECT = 100.0
-RATE_RW = SAMPLE_RATE/BLOCK_SIZE
 pitch_lock = threading.Lock()
 
 def check_overtake(pointer1, pointer2, jump_size, buffer_length):
@@ -115,6 +114,11 @@ def audio_callback(outdata, frames, time_info, status):
     if not pitch:
         pitch = 140
     shift = find_nearest_note(pitch, FREQ_TABLE) / pitch
+    period_samples = SAMPLE_RATE / pitch
+    # Handle underrun
+    if check_overtake(write_pos, read_pos, BLOCK_SIZE, len(input_buffer)):
+        read_pos += period_samples
+        read_pos %= len(input_buffer)
 
     read_indexes = np.zeros(BLOCK_SIZE, dtype=np.int32)
     real_read_pos = read_pos
@@ -135,11 +139,6 @@ def audio_callback(outdata, frames, time_info, status):
         if check_overtake(read_pos, write_pos, 2, len(input_buffer)):
             read_pos -= period_samples
             real_read_pos -= period_samples
-            read_pos %= len(input_buffer)
-            real_read_pos %= len(input_buffer)
-        elif check_overtake(write_pos, read_pos, BLOCK_SIZE, len(input_buffer)):
-            read_pos += period_samples
-            real_read_pos += period_samples
             read_pos %= len(input_buffer)
             real_read_pos %= len(input_buffer)
     
