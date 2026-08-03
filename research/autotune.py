@@ -64,7 +64,7 @@ FRAME_WIDTH = int(2*SAMPLE_RATE/F_MIN)   # in number of samples
 WINDOW_SIZE = int(SAMPLE_RATE/F_MIN)
 FREQ_TABLE = generate_freq_table("" if args.chromatic else args.key.split()[0], "" if args.chromatic else args.key.split()[1], F_MAX, args.chromatic)
 
-past_pitches = [0 for i in range(5)]
+past_pitches = [0 for i in range(3)]
 input_buffer = np.zeros(shape=(BLOCK_SIZE*16,), dtype=np.float32)
 input_stream = stream_wav_file(args.input, BLOCK_SIZE)
 read_pos = 0
@@ -96,7 +96,6 @@ def call_pitch_detect():
     with pitch_lock:
         pitch_indexes = np.arange(write_pos - FRAME_WIDTH, write_pos, dtype=np.int32)
         pitch = detect_pitch(input_buffer[pitch_indexes], SAMPLE_RATE, WINDOW_SIZE, TAU_MAX, TAU_MIN)
-        print(pitch)
         del past_pitches[0]
         past_pitches.append(pitch)
 
@@ -114,6 +113,7 @@ def audio_callback(outdata, frames, time_info, status):
     if not pitch:
         pitch = 140
     shift = find_nearest_note(pitch, FREQ_TABLE) / pitch
+    print(pitch)
     period_samples = SAMPLE_RATE / pitch
     # Handle underrun
     if check_overtake(write_pos, read_pos, BLOCK_SIZE, len(input_buffer)):
