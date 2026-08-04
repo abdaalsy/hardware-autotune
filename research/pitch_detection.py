@@ -73,9 +73,6 @@ def optimized_yin(frame, fs, window_size, tau_max, tau_min, threshold=0.8):
     if chosen_tau is None:
         chosen_tau = min_tau
     
-    if d_prime[chosen_tau] > 0.15: 
-        return 0.0 # Unvoiced/Silence
-   
     # Some parabolic interpolation for extra precision, this creates a parabola through d_prime[chosen_tau], and its neighbours, and then picks the x-value (tau) of the vertex
     if chosen_tau > tau_min and chosen_tau < tau_max - 1:
         alpha = d_prime[chosen_tau - 1]

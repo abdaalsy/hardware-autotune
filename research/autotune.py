@@ -11,7 +11,7 @@ from note_matching import generate_freq_table, find_nearest_note
 parser = argparse.ArgumentParser(description="Process data with chunks and shifts.")
 parser.add_argument("-i", "--input", default="vocals.wav", type=str, help="Input file path")
 parser.add_argument("-k", "--key", type=str, help="The musical key (ex. \"C major\")")
-parser.add_argument("-c", "--chromatic", type=bool, help="Whether or not to use the chromatic scale.")
+parser.add_argument("-c", "--chromatic", default=False, type=bool, help="Whether or not to use the chromatic scale.")
 args = parser.parse_args()
 
 def stream_wav_file(file_path, chunk_size=512):
@@ -63,14 +63,15 @@ BLOCK_SIZE = 128
 FRAME_WIDTH = int(2*SAMPLE_RATE/F_MIN)   # in number of samples
 WINDOW_SIZE = int(SAMPLE_RATE/F_MIN)
 FREQ_TABLE = generate_freq_table("" if args.chromatic else args.key.split()[0], "" if args.chromatic else args.key.split()[1], F_MAX, args.chromatic)
+print(FREQ_TABLE)
 
-past_pitches = [0 for i in range(3)]
+past_pitches = [0 for i in range(5)]
 input_buffer = np.zeros(shape=(BLOCK_SIZE*16,), dtype=np.float32)
 input_stream = stream_wav_file(args.input, BLOCK_SIZE)
 read_pos = 0
 write_pos = read_pos + 4*BLOCK_SIZE
 
-RATE_PITCH_DETECT = 100.0
+RATE_PITCH_DETECT = 100.0 # Hz
 pitch_lock = threading.Lock()
 
 def check_overtake(pointer1, pointer2, jump_size, buffer_length):
@@ -96,6 +97,9 @@ def call_pitch_detect():
     with pitch_lock:
         pitch_indexes = np.arange(write_pos - FRAME_WIDTH, write_pos, dtype=np.int32)
         pitch = detect_pitch(input_buffer[pitch_indexes], SAMPLE_RATE, WINDOW_SIZE, TAU_MAX, TAU_MIN)
+        if abs(2*pitch - past_pitches[-1]) < 3:  # Catch octave mistakes
+            pitch *= 2
+        print(pitch)
         del past_pitches[0]
         past_pitches.append(pitch)
 
@@ -112,11 +116,12 @@ def audio_callback(outdata, frames, time_info, status):
     pitch = sorted_pitches[int(len(sorted_pitches)/2)]
     if not pitch:
         pitch = 140
-    shift = find_nearest_note(pitch, FREQ_TABLE) / pitch
-    print(pitch)
+    note_hz = find_nearest_note(pitch, FREQ_TABLE)
+    shift = note_hz / pitch
     period_samples = SAMPLE_RATE / pitch
     # Handle underrun
     if check_overtake(write_pos, read_pos, BLOCK_SIZE, len(input_buffer)):
+        print("underrun")
         read_pos += period_samples
         read_pos %= len(input_buffer)
 
@@ -137,6 +142,7 @@ def audio_callback(outdata, frames, time_info, status):
         
         # Handle overrun/underruns
         if check_overtake(read_pos, write_pos, 2, len(input_buffer)):
+            print("overrun")
             read_pos -= period_samples
             real_read_pos -= period_samples
             read_pos %= len(input_buffer)

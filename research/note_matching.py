@@ -1,5 +1,6 @@
 import numpy as np
 import sys
+import math
 
 # The notes in Major keys follow the pattern:   W - W - H - W - W - W - H
 # Minor keys follow:                            W - H - W - W - H - W - W
@@ -58,19 +59,27 @@ def generate_freq_table(key, scale, max_hz, chromatic):
     return table
 
 def find_nearest_note(freq, table):
-    # binary search since table will be sorted, return last value
+    # Safeguard against unvoiced/silent frames from your pitch tracker
+    if freq <= 0: 
+        return freq 
+        
     start = 0
-    end = len(table)-1
-    while abs(start - end) > 1:
-        mid = int((start + end)/2)
+    end = len(table) - 1
+    
+    # end - start is safer and cleaner than abs() since end >= start
+    while end - start > 1: 
+        mid = (start + end) // 2
         if freq >= table[mid]:
             start = mid
         else:
             end = mid
-    
+            
     if start != end:
-        diff = abs(table[start] - freq)
-        if abs(table[end] - freq) < diff:
+        # Calculate LOGARITHMIC distance (how our ears actually hear pitch)
+        dist_start = abs(math.log(freq / table[start]))
+        dist_end = abs(math.log(freq / table[end]))
+        
+        if dist_end < dist_start:
             return table[end]
         else:
             return table[start]
@@ -78,6 +87,6 @@ def find_nearest_note(freq, table):
         return table[start]
 
 if __name__ == "__main__":
-    table = generate_freq_table(sys.argv[1], sys.argv[2], 800)
+    table = generate_freq_table(sys.argv[1], sys.argv[2], 800, False)
     print(find_nearest_note(100, table))
 
