@@ -76,10 +76,9 @@ def find_nearest_note(freq, table):
             
     if start != end:
         # Calculate LOGARITHMIC distance (how our ears actually hear pitch)
-        dist_start = abs(math.log(freq / table[start]))
-        dist_end = abs(math.log(freq / table[end]))
+        midpoint = math.sqrt(table[start] * table[end])
         
-        if dist_end < dist_start:
+        if freq > midpoint:
             return table[end]
         else:
             return table[start]

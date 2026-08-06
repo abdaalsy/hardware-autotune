@@ -95,11 +95,20 @@ def circular_slice(arr, start_idx, length):
 def call_pitch_detect():
     global past_pitches
     with pitch_lock:
-        pitch_indexes = np.arange(write_pos - FRAME_WIDTH, write_pos, dtype=np.int32)
+        #pitch_indexes = np.zeros(FRAME_WIDTH, dtype=np.int32)
+        #pitch_pos = read_pos
+        #for i in range(FRAME_WIDTH):
+        #    pitch_indexes[FRAME_WIDTH-1-i] = pitch_pos
+        #    pitch_pos -= 1
+        #    pitch_pos %= len(input_buffer)
+        #    if pitch_pos == write_pos:
+        #        pitch_pos += int(SAMPLE_RATE / (past_pitches[-1] or 140))
+        #    pitch_pos %= len(input_buffer)
+        
+        pitch_indexes = np.arange(write_pos - FRAME_WIDTH, write_pos, dtype=np.int32) 
         pitch = detect_pitch(input_buffer[pitch_indexes], SAMPLE_RATE, WINDOW_SIZE, TAU_MAX, TAU_MIN)
-        if abs(2*pitch - past_pitches[-1]) < 3:  # Catch octave mistakes
+        if abs(2*pitch - past_pitches[-1]) < 5:  # Catch when our pitch detector guesses an octave lower within a tolerance
             pitch *= 2
-        print(pitch)
         del past_pitches[0]
         past_pitches.append(pitch)
 
@@ -117,6 +126,7 @@ def audio_callback(outdata, frames, time_info, status):
     if not pitch:
         pitch = 140
     note_hz = find_nearest_note(pitch, FREQ_TABLE)
+    # print(note_hz)
     shift = note_hz / pitch
     period_samples = SAMPLE_RATE / pitch
     # Handle underrun
