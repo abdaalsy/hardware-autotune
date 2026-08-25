@@ -69,6 +69,7 @@ past_pitches = [0 for i in range(5)]
 input_buffer = np.zeros(shape=(BLOCK_SIZE*16,), dtype=np.float32)
 input_stream = stream_wav_file(args.input, BLOCK_SIZE)
 read_pos = 0
+real_read_pos = read_pos
 write_pos = read_pos + 4*BLOCK_SIZE
 
 RATE_PITCH_DETECT = 100.0 # Hz
@@ -114,7 +115,7 @@ def call_pitch_detect():
         past_pitches.append(pitch)
 
 def audio_callback(outdata, frames, time_info, status):
-    global read_pos, write_pos, input_buffer
+    global read_pos, real_read_pos, write_pos, input_buffer
     # Move write head
     write_indexes = np.arange(write_pos, write_pos + BLOCK_SIZE, dtype=np.int32) % len(input_buffer)
     input_buffer[write_indexes] = next(input_stream)
@@ -137,8 +138,6 @@ def audio_callback(outdata, frames, time_info, status):
         read_pos %= len(input_buffer)
 
     read_indexes = np.zeros(BLOCK_SIZE, dtype=np.int32)
-    real_read_pos = read_pos
-    pitch_read_pos = read_pos
     for k in range(BLOCK_SIZE):
         read_indexes[k] = read_pos 
         read_pos += 1

@@ -51,7 +51,7 @@ def optimized_yin(frame, fs, window_size, tau_max, tau_min, threshold=0.6):
     W = window_size
     length = len(frame)
 
-    frame = bandpass(frame, 50, 1500, fs)
+    # frame = bandpass(frame, 50, 1500, fs)
 
     d, ref_energy = squared_difference(frame, length, W, tau_max)
     d_prime = cmndf(d, tau_max)
