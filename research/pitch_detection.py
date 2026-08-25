@@ -19,7 +19,7 @@ def squared_difference(signal, length, W, tau_max):
         d[tau] = reference_energy + lagged_new - 2*autocorrelation(signal, length, W, tau)
         lagged_old = lagged_new
 
-    return d
+    return d, reference_energy
 
 def cmndf(d, tau_max):
     d_prime = np.ones(tau_max)  # Stores output of CMNDF for all lags (including 1 b/c the math collapses if we start from tau_min)
@@ -53,7 +53,7 @@ def optimized_yin(frame, fs, window_size, tau_max, tau_min, threshold=0.6):
 
     frame = bandpass(frame, 50, 1500, fs)
 
-    d = squared_difference(frame, length, W, tau_max)
+    d, ref_energy = squared_difference(frame, length, W, tau_max)
     d_prime = cmndf(d, tau_max)
 
     # Run through till we find the first LOCAL MIN with a vlaue under the threshold
@@ -83,7 +83,7 @@ def optimized_yin(frame, fs, window_size, tau_max, tau_min, threshold=0.6):
             delta = (gamma - alpha) / denom
             chosen_tau = chosen_tau + delta
 
-    return fs / chosen_tau
+    return {"pitch": fs / chosen_tau, "ref_energy": ref_energy, "sdf": d, "cmndf": d_prime}
 
 
 def detect_pitch(signal, sample_rate, window_size, tau_max, tau_min, threshold=0.1):

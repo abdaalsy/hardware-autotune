@@ -38,7 +38,7 @@ def stream_wav_file(file_path, chunk_size=512):
             # 1. Read exactly 'chunk_size' frames from the file
             raw_bytes = wav.readframes(chunk_size)
             # If raw_bytes is empty, we reached the end of the file
-            if not raw_bytes:
+if not raw_bytes:
                 break
             # 2. Convert the raw bytes into an integer NumPy array
             audio_data = np.frombuffer(raw_bytes, dtype=dtype)
@@ -47,7 +47,7 @@ def stream_wav_file(file_path, chunk_size=512):
                 audio_data = audio_data.reshape(-1, channels)
             # 4. Convert to float32 and normalize between -1.0 and 1.0
             if dtype == np.uint8:
-                # 8-bit audio centers around 128 (unsigned), so shift and scale
+# 8-bit audio centers around 128 (unsigned), so shift and scale
                 float_data = (audio_data.astype(np.float32) - 128.0) / 128.0
             else:
                 float_data = audio_data.astype(np.float32) / max_val
@@ -78,10 +78,11 @@ def check_overtake(pointer1, pointer2, jump_size, buffer_length):
     # Returns true if pointer1 is about to overtake pointer2 after stepping forward jump_size elements in a circular buffer of length buffer_length
     
     # Case 1: pointer2 > pointer1, but within jump_size of pointer1
-    if (pointer2 > pointer1) and ((pointer1+jump_size) >= pointer2):
+    pointer1_nextpos = pointer1+jump_size
+    if (pointer2 > pointer1) and (pointer1_nextpos >= pointer2):
         return True
     # Case 2: pointer2 has already wrapped around, but is still within jump_size of pointer1 (which is boutta wrap)
-    if (pointer1 > pointer2) and ((pointer1 + jump_size) >= buffer_length) and (((pointer1 + jump_size)%buffer_length) >= pointer2):
+    if (pointer1 > pointer2) and (pointer1_nextpos >= buffer_length) and ((pointer1_nextpos%buffer_length) >= pointer2):
         return True
     return False
 
@@ -106,7 +107,7 @@ def call_pitch_detect():
         #    pitch_pos %= len(input_buffer)
         
         pitch_indexes = np.arange(write_pos - FRAME_WIDTH, write_pos, dtype=np.int32) 
-        pitch = detect_pitch(input_buffer[pitch_indexes], SAMPLE_RATE, WINDOW_SIZE, TAU_MAX, TAU_MIN)
+        pitch = detect_pitch(input_buffer[pitch_indexes], SAMPLE_RATE, WINDOW_SIZE, TAU_MAX, TAU_MIN)["pitch"]
         if abs(2*pitch - past_pitches[-1]) < 5:  # Catch when our pitch detector guesses an octave lower within a tolerance
             pitch *= 2
         del past_pitches[0]
@@ -126,7 +127,7 @@ def audio_callback(outdata, frames, time_info, status):
     if not pitch:
         pitch = 140
     note_hz = find_nearest_note(pitch, FREQ_TABLE)
-    # print(note_hz)
+    print(note_hz)
     shift = note_hz / pitch
     period_samples = SAMPLE_RATE / pitch
     # Handle underrun
@@ -142,10 +143,11 @@ def audio_callback(outdata, frames, time_info, status):
         read_indexes[k] = read_pos 
         read_pos += 1
         real_read_pos += shift
-        if shift > 1 and real_read_pos-read_pos >= 1:
+        pos_diff = real_read_pos - read_pos
+        if shift > 1 and pos_diff >= 1:
             read_pos += 1
-        elif shift < 1 and read_pos-real_read_pos >= 1:
-            read_pos -= 1
+        elif shift < 1 and pos_diff <= -1:
+            read_pos += -1
 
         read_pos %= len(input_buffer)
         real_read_pos %= len(input_buffer)
