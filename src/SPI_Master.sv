@@ -1,5 +1,7 @@
 `default_nettype none 
 
+// TODO: keep clk at regular 100 MHz so that we can synchronize MISO samples
+
 module SPI_Master #(
     parameter int BIT_WIDTH = 24
 ) (
@@ -38,7 +40,8 @@ assign start_posedge = (start_sreg[2] == 1'b0 && start_sreg[1] == 1'b1);
 logic [4:0] bit_count; 
 
 always_ff @(posedge clk or negedge rst_n) begin 
-    if (!rst_n) begin 
+    if (!rst_n) begin
+        current_state <= IDLE;
         bit_count <= '0;
         sck_sreg <= '0;
         start_sreg <= '0;
@@ -119,6 +122,9 @@ always_ff @(negedge clk) begin
     endcase
 end
 
+logic [7:0] cmd_op;
+assign cmd_op = cmnd_addr[31:24];
+
 always_comb begin 
     next_state = current_state;
     case (current_state)
@@ -127,14 +133,17 @@ always_comb begin
         START_SCK: next_state = SEND_CMND_ADDR;
         SEND_CMND_ADDR: begin 
             if (bit_count == 0) begin // might cause early transition to READ/WRITE
-                if (cmnd_addr[31:24] == 8'h03) next_state = READ;
-                if (cmnd_addr[31:24] == 8'h02) next_state = WRITE;
-                else next_state = END;
-            end 
+                if (cmd_op == 8'h03) next_state = READ;
+                if (cmd_op == 8'h02) next_state = WRITE;
+            end else begin 
+                next_state = END;
+            end
         end 
         READ: if (bit_count == 5'(BIT_WIDTH-1)) next_state = END_SCK;
         WRITE: if (bit_count == 5'(BIT_WIDTH-1)) next_state = END_SCK;
         END_SCK: next_state = END;
         END: next_state = IDLE;
     endcase 
-end 
+end
+
+endmodule
