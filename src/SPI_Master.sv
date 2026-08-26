@@ -4,7 +4,7 @@ module SPI_Master #(
     parameter int BIT_WIDTH = 24
 ) (
     input logic start,
-    input logic clk,
+    input logic clk,    // 20 MHz
     input logic rst_n,
     input logic [31:0] cmnd_addr,
     input logic [BIT_WIDTH-1:0] sample_in,
@@ -58,10 +58,66 @@ always_ff @(posedge clk or negedge rst_n) begin
                 SCK <= 1'b0;
                 MOSI <= 1'b0;
             end
+            START: begin 
+                bit_count <= '0;
+                busy <= 1'b1;
+                CS <= 1'b0; // Select ram module 
+                SCK <= 1'b0;
+                MOSI <= 1'b0;
+            end 
+            START_SCK: begin
+                bit_count <= '0;
+                busy <= 1'b1;
+                CS <= 1'b0;
+                SCK <= clk;
+                MOSI <= 1'b0;
+            end
+            READ: begin
+                bit_count <= bit_count + 1'b1;
+                busy <= 1'b1;
+                CS <= 1'b0;
+                SCK <= clk;
+                MOSI <= 1'b0;
+                sample_out <= {sample_out[BIT_WIDTH-2:0], MISO};
+            end
+            WRITE: begin
+                ; // do nothing for WRITE on rising edges
+            end
+            END_SCK: begin
+                bit_count <= '0;
+                busy <= 1'b1;
+                CS <= 1'b0;
+                SCK <= 1'b0; // SCK is scheduled to be zero at the end of this edge, verify this in sim 
+                MOSI <= 1'b0;
+            end
+            END: begin
+                bit_count <= '0;
+                busy <= 1'b1;
+                CS <= 1'b1;
+                SCK <= 1'b0;
+                MOSI <= 1'b0;
+            end 
         endcase
     end
-
 end 
+
+// always_ff block for clock falling edge.
+// when in write state we need to drive MOSI at falling edges.
+always_ff @(negedge clk) begin
+    case (current_state)
+        WRITE: begin
+            bit_count <= bit_count + 1'b1;
+            busy <= 1'b1;
+            CS <= 1'b0;
+            SCK <= clk;
+            MOSI <= sample_in[bit_count];
+        end
+        default: begin
+            ;   // do nothing for all other state on falling edges
+            // That might hcange for like END, or END_SCK
+        end
+    endcase
+end
 
 always_comb begin 
     next_state = current_state;
@@ -76,8 +132,8 @@ always_comb begin
                 else next_state = END;
             end 
         end 
-        READ: if (bit_count == 5'BIT_WIDTH) next_state = END_SCK;
-        WRITE: if (bit_count == 5'BIT_WIDTH) next_state = END_SCK;
+        READ: if (bit_count == 5'(BIT_WIDTH-1)) next_state = END_SCK;
+        WRITE: if (bit_count == 5'(BIT_WIDTH-1)) next_state = END_SCK;
         END_SCK: next_state = END;
         END: next_state = IDLE;
     endcase 
