@@ -6,3 +6,4 @@ vtr-verilog-to-routing/
 *.m4a
 *.wav
 research/spectrogram.png research/vocals.png
+sim_build/
