@@ -2,3 +2,4 @@ cocotb
 scipy
 numpy
 sounddevice
+pytest
