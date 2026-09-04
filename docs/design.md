@@ -10,7 +10,7 @@ Inouts (total 8 bits): RAM module (4 bits)
 
 ## Parameters
 
-Bit width: 32
+Bit width: 24
 Format: Fixed-point
 BLOCK_SIZE: 128 samples
 F_MAX: 800 Hz
