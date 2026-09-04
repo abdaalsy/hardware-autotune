@@ -97,6 +97,7 @@ async def test_spi_write(dut):
     dut._log.info(f"[WRITE TEST] Captured 64-bit MOSI stream: {hex(captured_mosi)}")
     
     assert captured_mosi == expected_data, f"SPI Write Mismatch! Expected: {hex(expected_data)}, Got: {hex(captured_mosi)}"
+    assert dut.current_state.value == 0, f"Incorrect state! Expected: 0, Got: {dut.current_state.value}"
     dut._log.info("[WRITE TEST] SUCCESS: Master correctly drove Command/Address and Data.")
 
 @cocotb.test()
