@@ -38,7 +38,7 @@ def stream_wav_file(file_path, chunk_size=512):
             # 1. Read exactly 'chunk_size' frames from the file
             raw_bytes = wav.readframes(chunk_size)
             # If raw_bytes is empty, we reached the end of the file
-if not raw_bytes:
+            if not raw_bytes:
                 break
             # 2. Convert the raw bytes into an integer NumPy array
             audio_data = np.frombuffer(raw_bytes, dtype=dtype)
@@ -107,7 +107,7 @@ def call_pitch_detect():
         #        pitch_pos += int(SAMPLE_RATE / (past_pitches[-1] or 140))
         #    pitch_pos %= len(input_buffer)
         
-        pitch_indexes = np.arange(write_pos - FRAME_WIDTH, write_pos, dtype=np.int32) 
+        pitch_indexes = np.arange(write_pos - FRAME_WIDTH, write_pos, dtype=np.int32) % len(input_buffer) 
         pitch = detect_pitch(input_buffer[pitch_indexes], SAMPLE_RATE, WINDOW_SIZE, TAU_MAX, TAU_MIN)["pitch"]
         if abs(2*pitch - past_pitches[-1]) < 5:  # Catch when our pitch detector guesses an octave lower within a tolerance
             pitch *= 2
@@ -138,8 +138,10 @@ def audio_callback(outdata, frames, time_info, status):
         read_pos %= len(input_buffer)
 
     read_indexes = np.zeros(BLOCK_SIZE, dtype=np.int32)
+    read_indexes_float = np.zeros(BLOCK_SIZE, dtype=np.float32)
     for k in range(BLOCK_SIZE):
-        read_indexes[k] = read_pos 
+        read_indexes[k] = read_pos
+        read_indexes_float[k] = real_read_pos
         read_pos += 1
         real_read_pos += shift
         pos_diff = real_read_pos - read_pos
@@ -159,7 +161,17 @@ def audio_callback(outdata, frames, time_info, status):
             read_pos %= len(input_buffer)
             real_read_pos %= len(input_buffer)
     
-    outdata[:] = input_buffer[read_indexes].reshape(BLOCK_SIZE, 1)
+    # Perform Linear Interpolation across the whole block
+    idx_floor = np.floor(read_indexes_float).astype(np.int32)
+    idx_ceil = (idx_floor + 1) % len(input_buffer)
+    frac = read_indexes_float - idx_floor
+
+    # y = (1 - frac) * y_floor + frac * y_ceil
+    val_floor = input_buffer[idx_floor]
+    val_ceil = input_buffer[idx_ceil]
+
+    outdata[:] = ((1 - frac) * val_floor + frac * val_ceil).reshape(BLOCK_SIZE, 1)
+    # outdata[:] = input_buffer[read_indexes].reshape(BLOCK_SIZE, 1)
     
 # ==========================================
 # THREAD LOOP WORKERS
