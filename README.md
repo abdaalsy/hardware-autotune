@@ -81,11 +81,31 @@ Important:
 - $C_3$ MUST be placed as close as humanly possible to the $V_{cc}$ and $V_{HP}$ pins. Yes that means two capacitors. Same goes for $C_1$.
 - Both $R_g$ MUST be placed as close to the gate of the respective MOSFET as possible.
 
-## Part Sources
+### Part Sources
 
 WIP
 
 Need LDOs for $3.3 V$ and $2.4 V$ rails.
+
+External RAM module: Microchip 23LC1024
+
+## Digital Design
+
+### Memory Map
+
+This project will use two external RAM modules:
+
+- RAM0: Connected to both resampling and pitch detection which will contain the input, output, and circular buffers
+- RAM1: Connected to just pitch detection which will contain the current frame, autocorrelation values, etc.
+
+Memory map for RAM0:
+
+| Region Name	    | Start Address (Hex)   | End Address (Hex) | Length (Bytes)    | Length (Hex)  | Description               |
+| ----------------- | --------------------- | ----------------- | ----------------- | ------------- | ------------------------- | 
+| Reserved	        | 0x000                 | 0x00F             | 16                | 0x010         | Reserved system space     |     
+| Input Buffer	    | 0x010	                | 0x40F	            | 1,024	            | 0x400	        | Input data buffer region  |
+| Output Buffer     | 0x410                 | 0x80F             | 1,024	            | 0x400	        | Output data buffer region |
+| Circular Buffer   |	0x810               | 0x480F            | 16,384            | 0x4000        | Circular buffer region    |
 
 ## Ideas for the Future
 

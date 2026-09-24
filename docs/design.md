@@ -12,7 +12,7 @@ Inouts (total 8 bits): RAM module (4 bits)
 
 Bit width: 24
 Format: Fixed-point
-BLOCK_SIZE: 128 samples
+BLOCK_SIZE: 256 samples
 F_MAX: 800 Hz
 F_MIN: 50 Hz
 SAMPLE_RATE: 48000 Hz
@@ -69,3 +69,6 @@ Finally, we resample repeating the following operations BLOCK_SIZE times:
 - (window_size * tau_max) + (4 * tau_max) - 2 multiplications
 - 2 * tau_max divisions
 - 4 * (tau_max - tau_min) comparisons (worst-case scenario)
+
+I can optimize this by storing prior autocorrelation for each lag.
+
