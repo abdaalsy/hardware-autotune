@@ -77,7 +77,7 @@ typedef enum logic[3:0] {
 state_t current_state, next_state;
 
 logic [BIT_WIDTH-1:0] write_pos, read_pos, real_read_pos, current_sample;
-logic [$clog2(BLOCK_SIZE):0] num_samples_write, num_samples_read;
+logic [$clog2(BLOCK_SIZE)+1:0] num_samples_write, num_samples_read;
 logic [1:0] start_sreg, resA_sreg;
 logic start_posedge, resA_posedge;
 logic underrun, overrun; // signals that'll indicate under/overruns
@@ -112,7 +112,7 @@ always_comb begin
         READ_INPUT: if (resA_posedge) next_state = WRITE_CIRCULAR;
         WRITE_CIRCULAR: if (resA_posedge) next_state = INCREMENT_WRITE_POS;
         INCREMENT_WRITE_POS: begin
-            if (num_samples_write == BLOCK_SIZE-1) begin 
+            if (num_samples_write == BLOCK_SIZE) begin 
                 // stop when we've written all BLOCK_SIZE samples to the circular buffer
                 next_state = FIX_UNDERRUN;
             end else begin
@@ -138,7 +138,7 @@ always_comb begin
         end
         FIX_OVERRUN: begin
             if (!overrun) begin
-                if (num_samples_read == BLOCK_SIZE-1) begin
+                if (num_samples_read == BLOCK_SIZE) begin
                     next_state = IDLE;
                 end else begin
                     next_state = READ_CIRCULAR;
@@ -187,19 +187,23 @@ always_ff @(posedge clk or negedge rst_n) begin
             end
             READ_INPUT: begin
                 // set address of input buffer base + write_pos offset
-                address_A <= 24'd(INPUT_BUFFER_BASE) + num_samples_write;
+                address_A <= INPUT_BUFFER_BASE + num_samples_write;
                 start_read_A <= 1'b1;
                 start_write_A <= 1'b0;
                 val_A <= '0;
-                if (res_A) current_sample <= value_in; // This will receive the value from the memory controller
+                if (res_A) begin
+                    current_sample <= value_in; // This will receive the value from the memory controller
+                    start_read_A <= 1'b0;
+                end
                 busy <= 1'b1;
             end
             WRITE_CIRCULAR: begin 
-                address_A <= 24'd(CIRCULAR_BUFFER_BASE) + {12'b0, write_pos[BIT_WIDTH-1:ONES_BIT]};
+                address_A <= CIRCULAR_BUFFER_BASE + {12'b0, write_pos[BIT_WIDTH-1:ONES_BIT]};
                 val_A <= current_sample;
                 start_read_A <= 1'b0;
                 start_write_A <= 1'b1;
                 busy <= 1'b1;
+                if (res_A) start_write_A <= 1'b0;
             end
             INCREMENT_WRITE_POS: begin
                 busy <= 1'b1;
@@ -208,7 +212,7 @@ always_ff @(posedge clk or negedge rst_n) begin
                 start_read_A <= 1'b0;
                 start_write_A <= 1'b0;
                 current_sample <= '0;
-                if (num_samples_write != BLOCK_SIZE-1) begin
+                if (num_samples_write != BLOCK_SIZE) begin
                     write_pos <= write_pos + 13'h1000;  // the lower 12 bits correspond to the fractional portion
                     // the circular buffer has length 4096 which automatically wraps with 24 bit width fixed point
                     num_samples_write <= num_samples_write + 1'b1;
@@ -227,18 +231,22 @@ always_ff @(posedge clk or negedge rst_n) begin
             READ_CIRCULAR: begin
                 // read the circular buffer for a sample
                 busy <= 1'b1;
-                address_A <= 24'd(CIRCULAR_BUFFER_BASE) + {12'b0, read_pos[BIT_WIDTH-1:ONES_BIT]};
+                address_A <= CIRCULAR_BUFFER_BASE + {12'b0, read_pos[BIT_WIDTH-1:ONES_BIT]};
                 start_read_A <= 1'b1;
                 start_write_A <= 1'b0;
-                if (res_A) current_sample <= value_in;
+                if (res_A) begin
+                    current_sample <= value_in;
+                    start_read_A <= 1'b0;
+                end
             end
             WRITE_OUTPUT: begin
                 // write the read sample to the output buffer
                 busy <= 1'b1;
-                address_A <= 24'd(OUTPUT_BUFFER_BASE) + num_samples_read;
+                address_A <= OUTPUT_BUFFER_BASE + num_samples_read;
                 val_A <= current_sample;
                 start_read_A <= 1'b0;
                 start_write_A <= 1'b1;
+                if (res_A) start_write_A <= 1'b0;
             end
             INCREMENT_READ_POS: begin
                 busy <= 1'b1;
@@ -266,7 +274,7 @@ always_ff @(posedge clk or negedge rst_n) begin
                     num_samples_read <= num_samples_read + 1'b1; // Increment ONLY when safe
                     
                     // once overrun addressed and we're on our last sample, output our values
-                    if (num_samples_read == BLOCK_SIZE-1) begin
+                    if (num_samples_read == BLOCK_SIZE) begin
                         read_pos_out <= read_pos;
                         real_read_pos_out <= real_read_pos;
                     end
