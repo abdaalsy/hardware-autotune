@@ -28,11 +28,11 @@ typedef enum logic {
 state_t current_state, next_state;
 
 logic [BIT_WIDTH-1:0] sample_in;
-logic [2:0] start_sreg, resA_sreg;
+logic [1:0] start_sreg, resA_sreg;
 logic start_posedge, resA_posedge, ready_n;
 
-assign start_posedge = (start_sreg[2] == 1'b0 && start_sreg[1] == 1'b1);
-assign resA_posedge = (resA_sreg[2] == 1'b0 && resA_sreg[1] == 1'b1);
+assign start_posedge = (start_sreg[1] == 1'b0 && start_sreg[0] == 1'b1);
+assign resA_posedge = (resA_sreg[1] == 1'b0 && resA_sreg[0] == 1'b1);
 assign address_A = address;
 assign ready = ~ready_n;
 
@@ -55,12 +55,12 @@ always_ff @(posedge clk or negedge rst_n) begin
         val_A <= '0;
     end else begin
         current_state <= next_state;
-        start_sreg <= {start_sreg[1:0], start};
-        resA_sreg <= {resA_sreg[1:0], res_A};
+        start_sreg <= {start_sreg[0], start};
+        resA_sreg <= {resA_sreg[0], res_A};
         case (current_state)
             IDLE: begin
                 start_write_A <= 1'b0;
-                val_A <= sample_in; // when start gets pulsed, val_A will have the most recent sample_in which will be good
+                if (start) val_A <= sample_in; // when start gets pulsed, val_A will have the most recent sample_in which will be good
             end
             WRITE: begin
                 start_write_A <= 1'b1;
