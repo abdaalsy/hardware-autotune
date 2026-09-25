@@ -30,7 +30,7 @@
 module Resampler #(
     parameter int BIT_WIDTH = 24,
     parameter int ONES_BIT = BIT_WIDTH/2,
-    parameter int BLOCK_SIZE = 256,
+    parameter int BLOCK_SIZE = 16,
     parameter int SAMPLE_RATE = 48000,
     parameter int INPUT_BUFFER_BASE = 'h10,
     parameter int CIRCULAR_BUFFER_BASE = 'h810,
