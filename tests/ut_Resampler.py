@@ -60,7 +60,7 @@ async def memory_responder(dut):
                 await RisingEdge(dut.clk)
 
 
-async def execute_resampler_test(dut, shift_val, test_name):
+async def execute_resampler_test(dut, shift_val, test_name, read_pos_in=500, write_pos_in=1000):
     """
     Common execution routine for testing the Resampler block.
     """
@@ -78,9 +78,9 @@ async def execute_resampler_test(dut, shift_val, test_name):
     
     # Offset the heads so they don't immediately trigger overrun/underrun logic.
     # The Fixed-point format has 12 fractional bits, so we shift integers by 12.
-    dut.write_pos_in.value = 1000 << 12
-    dut.read_pos_in.value = 500 << 12
-    dut.real_read_pos_in.value = 500 << 12
+    dut.write_pos_in.value = write_pos_in << 12
+    dut.read_pos_in.value = read_pos_in << 12
+    dut.real_read_pos_in.value = read_pos_in << 12
 
     # 3. Hardware Reset
     dut.rst_n.value = 0
@@ -143,10 +143,96 @@ async def test_pitch_normal(dut):
 async def test_pitch_up(dut):
     """Test Resampler with shift > 1.0 (Pitch Up)"""
     # 1.5 in fixed point (12 frac bits) is 0x1800
-    await execute_resampler_test(dut, shift_val=0x1800, test_name="Pitch_Up")
+    await execute_resampler_test(dut, shift_val=0x1800, read_pos_in=0, write_pos_in=0, test_name="Pitch_Up")
 
 @cocotb.test()
 async def test_pitch_down(dut):
     """Test Resampler with shift < 1.0 (Pitch Down)"""
     # 0.5 in fixed point (12 frac bits) is 0x0800
-    await execute_resampler_test(dut, shift_val=0x0800, test_name="Pitch_Down")
+    await execute_resampler_test(dut, shift_val=0x0800, write_pos_in=0, read_pos_in=300, test_name="Pitch_Down")
+
+@cocotb.test()
+async def test_continuous_processing(dut):
+    """Test chaining multiple resampling blocks consecutively without resetting."""
+    # 1. Setup 50 MHz Clock
+    clock = Clock(dut.clk, 20, unit="ns")
+    cocotb.start_soon(clock.start())
+    
+    # 2. Initialize inputs
+    dut.rst_n.value = 1
+    dut.start.value = 0
+    dut.shift.value = 0x1000 # 1.0 (Normal Speed)
+    dut.period_samples.value = 300
+    dut.res_A.value = 0
+    dut.value_in.value = 0
+    
+    # Initial startup offsets
+    dut.write_pos_in.value = 1000 << 12
+    dut.read_pos_in.value = 500 << 12
+    dut.real_read_pos_in.value = 500 << 12
+
+    # 3. Apply Hardware Reset once at the very beginning
+    dut.rst_n.value = 0
+    await ClockCycles(dut.clk, 5)
+    dut.rst_n.value = 1
+    await ClockCycles(dut.clk, 5)
+
+    # 4. Start the memory responder background task
+    responder_task = cocotb.start_soon(memory_responder(dut))
+
+    # Wait until out of reset and IDLE
+    while dut.busy.value == 1:
+        await RisingEdge(dut.clk)
+
+    num_blocks = 3
+    
+    for i in range(num_blocks):
+        dut._log.info(f"[Continuous] Preparing block {i+1}/{num_blocks}...")
+        
+        # If this is a subsequent run, feed the outputs back into the inputs
+        if i > 0:
+            dut.write_pos_in.value = dut.write_pos_out.value
+            dut.read_pos_in.value = dut.read_pos_out.value
+            dut.real_read_pos_in.value = dut.real_read_pos_out.value
+            dut._log.info(f"[Continuous] Positions updated from previous block's outputs.")
+        
+        # 5. Pulse Start for 2 cycles
+        dut.start.value = 1
+        await ClockCycles(dut.clk, 2)
+        dut.start.value = 0
+
+        # Wait for DUT to catch the start pulse and assert busy
+        while dut.busy.value == 0:
+            await RisingEdge(dut.clk)
+            
+        dut._log.info(f"[Continuous] Block {i+1} is processing...")
+
+        # 6. Wait for DUT to finish processing
+        timeout_cycles = 15000 
+        cycles_waited = 0
+        
+        # This loop polls on the rising clock edge until busy drops to 0.
+        # Exiting this loop guarantees a negative edge on busy has been detected,
+        # while keeping our testbench perfectly synchronized to the clock.
+        while dut.busy.value == 1:
+            await RisingEdge(dut.clk)
+            cycles_waited += 1
+            if cycles_waited > timeout_cycles:
+                responder_task.kill()
+                dut._log.error(f"[Continuous] Timeout! DUT stuck in busy state during block {i+1}.")
+                assert False, "DUT FSM deadlock detected!"
+                
+        # 7. Log the results of the current block
+        w_pos = int(dut.write_pos_out.value) / 4096.0
+        r_pos = int(dut.read_pos_out.value) / 4096.0
+        rr_pos = int(dut.real_read_pos_out.value) / 4096.0
+        
+        dut._log.info(f"[Continuous] Block {i+1} finished in {cycles_waited} cycles.")
+        dut._log.info(f"[Continuous] Output Positions -> Write: {w_pos:.2f}, Read: {r_pos:.2f}, Real: {rr_pos:.2f}")
+        
+        # Wait a few idle clock cycles before the next loop iteration pulses start again
+        await ClockCycles(dut.clk, 5)
+
+    # Clean up the background task
+    responder_task.kill()
+    dut._log.info(f"[Continuous] Successfully chained {num_blocks} blocks in a row!")
