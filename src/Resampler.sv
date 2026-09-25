@@ -164,6 +164,7 @@ always_ff @(posedge clk or negedge rst_n) begin
         read_pos <= '0;
         real_read_pos <= '0;
         num_samples_write <= '0;
+        num_samples_read <= '0;
         current_sample <= '0;
     end else begin
         current_state <= next_state;
@@ -254,6 +255,7 @@ always_ff @(posedge clk or negedge rst_n) begin
                 start_write_A <= 1'b0;
                 read_pos <= read_pos + 13'h1000;
                 real_read_pos <= real_read_pos + shift; // shift is in fixed point form
+                num_samples_read <= num_samples_read + 1'b1;
             end
             FIX_POS_DELTA: begin
                 // when the read_pos and real_read_pos differ by 1, we need to increment/decrement read_pos
@@ -271,8 +273,6 @@ always_ff @(posedge clk or negedge rst_n) begin
                     read_pos <= read_pos - {period_samples, {ONES_BIT{1'b0}}};
                     real_read_pos <= real_read_pos - {period_samples, {ONES_BIT{1'b0}}};
                 end else begin
-                    num_samples_read <= num_samples_read + 1'b1; // Increment ONLY when safe
-                    
                     // once overrun addressed and we're on our last sample, output our values
                     if (num_samples_read == BLOCK_SIZE) begin
                         read_pos_out <= read_pos;
