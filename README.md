@@ -112,8 +112,13 @@ Memory map for RAM1:
 | Region Name	    | Start Address (Hex)   | End Address (Hex) | Length (Bytes)    | Length (Hex)  | Description               |
 | ----------------- | --------------------- | ----------------- | ----------------- | ------------- | ------------------------- | 
 | Reserved	        | 0x000                 | 0x00F             | 16                | 0x010         | Reserved system space     |     
-| Note Freq LUT	    | 0x010	                | 	            | 	            | 	        | Table of note frequencies  |
-| Frame Buffer     |                  |              | 	            | 	        | Signal frame to be processed by pitch detection. |
+| Note Freq LUT	    | 0x010	                | 0x10F	            | 	256            | 	 0x100       | Table of note frequencies  |
+| Frame Buffer 1     | 0x200                 | 0x1FFF              | 7680	            | 0x1E00 	        | Signal frame to be processed by pitch detection. |
+| Frame Buffer 2     | 0x2000                 | 0x3DFF              | 7680 	            | 0x1E00 	        | Signal frame to be processed by pitch detection. |
+
+> [!NOTE]
+> You'll notice there are two frame buffers. The reason for this is so that while one is being built, the other one can be processed. Had we overwritten the same one while processing, our results would get corrupted.
+> Once a frame buffer has been processed, we swap the pointers for the processed one and the one being built.
 
 ### Parameters
 
