@@ -5,16 +5,11 @@ module Memory_Controller #(
 ) (
     input logic rst_n,
     input logic clk,
-    input logic [23:0] address_A,
-    input logic [BIT_WIDTH-1:0] val_A,
-    input logic                 start_read_A,
-    input logic                 start_write_A,
-    output logic res_A,
-    input logic [23:0] address_B,
-    input logic [BIT_WIDTH-1:0] val_B,
-    input logic                 start_read_B,
-    input logic                 start_write_B,
-    output logic res_B,
+    input logic [23:0] address_in,
+    input logic [BIT_WIDTH-1:0] val_in,
+    input logic                 start_read,
+    input logic                 start_write,
+    output logic res,
     output logic [BIT_WIDTH-1:0] val_out,
     output logic CS,
     output logic MOSI,
@@ -22,25 +17,22 @@ module Memory_Controller #(
     output logic SCK
 );
 
-typedef enum logic [2:0] {
+typedef enum logic [1:0] {
     IDLE,
-    SERVICE_A,
-    SERVICE_B,
-    OUTPUT_A,
-    OUTPUT_B
+    SERVICE,
+    OUTPUT
 } state_t;
 
 state_t current_state, next_state;
 
-logic [2:0] reqA_sreg, reqB_sreg, busy_sreg;
+logic [2:0] req_sreg, busy_sreg;
 logic [7:0] command;
 logic [BIT_WIDTH-1:0] address;
 logic [31:0] value_in;
 logic [31:0] full_val_out;
-logic reqA_posedge, reqB_posedge, busy_negedge, start_spi, service_b_after, busy; 
+logic req_posedge, busy_negedge, start_spi, busy; 
 
-assign reqA_posedge = (reqA_sreg[2] == 1'b0 && reqA_sreg[1] == 1'b1);
-assign reqB_posedge = (reqB_sreg[2] == 1'b0 && reqB_sreg[1] == 1'b1);
+assign req_posedge = (req_sreg[2] == 1'b0 && req_sreg[1] == 1'b1);
 assign busy_negedge = (busy_sreg[2] == 1'b1 && busy_sreg[1] == 1'b0);
 assign val_out = full_val_out[31:(32-BIT_WIDTH)];
 
@@ -61,56 +53,36 @@ SPI_Master u_SPI_Master (
 always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin 
         current_state <= IDLE;
-        reqA_sreg <= 3'b0;
-        reqB_sreg <= 3'b0;
+        req_sreg <= 3'b0;
         busy_sreg <= 3'b111;
-        res_A <= 1'b1;
-        res_B <= 1'b1;
+        res <= 1'b1;
         command <= 8'h00;
         address <= '0;
         value_in <= '0;
         start_spi <= 1'b0;
-        service_b_after <= 1'b0;
     end else begin
         current_state <= next_state;
-        reqA_sreg <= {reqA_sreg[1:0], start_read_A | start_write_A};
-        reqB_sreg <= {reqB_sreg[1:0], start_read_B | start_write_B};
+        req_sreg <= {req_sreg[1:0], start_read | start_write};
         busy_sreg <= {busy_sreg[1:0], busy};
         case (current_state)
             IDLE: begin
                 // val_out <= '0; let val_out keep its value from OUTPUT
                 value_in <= '0;
                 start_spi <= 1'b0;
-                if (reqA_posedge && reqB_posedge) service_b_after <= 1'b1;
             end
-            SERVICE_A: begin
-                res_A <= 1'b0;
-                if (start_read_A) begin
+            SERVICE: begin
+                res <= 1'b0;
+                if (start_read) begin
                     command <= 8'h03;
-                end else if (start_write_A) begin
+                end else if (start_write) begin
                     command <= 8'h02;
-                    value_in <= {val_A, 8'h00};
+                    value_in <= {val_in, 8'h00};
                 end
-                address <= address_A;
+                address <= address_in;
                 start_spi <= 1'b1;
             end
-            SERVICE_B: begin
-                service_b_after <= 1'b0;
-                res_B <= 1'b0;
-                if (start_read_B) begin
-                    command <= 8'h03;
-                end else if (start_write_B) begin
-                    command <= 8'h02;
-                    value_in <= {val_B, 8'h00};
-                end
-                address <= address_B;
-                start_spi <= 1'b1;
-            end
-            OUTPUT_A: begin
-                res_A <= 1'b1;
-            end
-            OUTPUT_B: begin
-                res_B <= 1'b1;
+            OUTPUT: begin
+                res <= 1'b1;
             end
             default: current_state <= IDLE;
         endcase
@@ -121,21 +93,12 @@ always_comb begin
     next_state = current_state;
     case (current_state)
         IDLE: begin
-            if (reqA_posedge) begin // prioritize A
-                next_state = SERVICE_A;
-            end else if (reqB_posedge) begin
-                next_state = SERVICE_B;
-            end
-            if (service_b_after) next_state = SERVICE_B;
+            if (req_posedge) next_state = SERVICE;
         end
-        SERVICE_A: begin
-            if (busy_negedge) next_state = OUTPUT_A;
+        SERVICE: begin
+            if (busy_negedge) next_state = OUTPUT;
         end
-        SERVICE_B: begin
-            if (busy_negedge) next_state = OUTPUT_B;
-        end
-        OUTPUT_A: next_state = IDLE;
-        OUTPUT_B: next_state = IDLE;
+        OUTPUT: next_state = IDLE;
         default: next_state = IDLE;
     endcase
 end
