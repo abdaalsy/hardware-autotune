@@ -93,6 +93,9 @@ module Cordic #(
     logic                          special;      // bypass: div-by-zero / sqrt(<=0)
     logic signed [BIT_WIDTH:0]      special_val;
 
+    logic prev_start, start_posedge;
+    assign start_posedge = (prev_start == 1'b0 && start == 1'b1);
+
     // ------------------------------------------------------------------
     // Combinational normalization helpers (evaluated from x_reg / y_reg
     // while in NORMALIZE, which hold A_in / B_in in Q(ONES_BIT))
@@ -162,12 +165,13 @@ module Cordic #(
             special     <= 1'b0;
             special_val <= '0;
             ans         <= '0;
+            prev_start  <= '0;
         end else begin
             state <= next_state;
-
+            prev_start <= start;
             case (state)
                 IDLE: begin
-                    if (start) begin
+                    if (start_posedge) begin
                         op_reg     <= opcode;
                         x_reg      <= A_in;
                         y_reg      <= B_in;
@@ -259,7 +263,7 @@ module Cordic #(
     always_comb begin
         next_state = state;
         case (state)
-            IDLE: if (start) next_state = NORMALIZE;
+            IDLE: if (start_posedge) next_state = NORMALIZE;
             NORMALIZE: begin
                 if (norm_special)  next_state = DESCALE;
                 else               next_state = DO_ITERATION;
