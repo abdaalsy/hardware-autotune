@@ -1,5 +1,3 @@
-// TODO: Ensure memory-interacting states transition on posedge, not res_A = 1
-
 // ============================================================================
 // Detect_Pitch : YIN pitch detector, memory-streaming, incremental
 //                autocorrelation, NO multiplier -- every multiplication is a
@@ -7,6 +5,14 @@
 //
 // Number format : signed Q(BIT_WIDTH-ONES_BIT).ONES_BIT (Q12.12), samples
 //                 normalised to |x| <= 1.0.  pitch is unsigned Q12.12 in Hz.
+//
+// Memory handshake
+//   A transaction is started by pulsing start_read / start_write with
+//   address (and val_out for writes) driven.  It COMPLETES on a RISING EDGE of
+//   `res` (res_posedge, derived from the res shift register below), never on
+//   the level of res -- the memory controller can hold res high while idle, so
+//   a level check would fall straight through before the data is ready.
+//   val_in is sampled in the cycle res_posedge is high.
 //
 // CORDIC assumptions (the only things the design relies on)
 //   * opcode 0 : ans = B_out / A_out, operands and result all Q12.12,
@@ -16,7 +22,9 @@
 //     removed from the autocorrelation is exactly the one that was added).
 //   * ans holds its value until the next start.
 //   * cordic_busy is high by two cycles after the cycle cordic_start is high.
-//   A_out is never zero when a division is issued.
+//   * The denominator A_out is NEVER NEGATIVE and never zero when a division is
+//     issued: reciprocals are taken of magnitudes and signs are applied here,
+//     outside the CORDIC (sign-magnitude).  Numerators (B_out) may be signed.
 //
 // Memory map (byte addresses, one 24-bit value per 4-byte slot)
 //   frame_base + 4*i     : sample i of the frame, i = 0 .. FRAME_LEN-1
@@ -38,6 +46,8 @@
 //             new : n = FRAME_LEN-HOP .. FRAME_LEN-1
 //             old : n = FRAME_LEN-W-HOP .. FRAME_LEN-W-1
 //           (first run: n = FRAME_LEN-W .. FRAME_LEN-1 after zeroing r)
+//           Sign handling: 1/|x[n]| is computed, y / (1/|x[n]|) = y*|x[n]|, and
+//           the product is negated afterwards if x[n] < 0.
 //           A product that is exactly zero (|x[n]| tiny, or x[n-lag] == 0) is
 //           skipped; this is the same function every time, so add/remove match.
 //   Pass 2  per lag: lagged energy (recurrence, 2 squares), d(lag), CMNDF with
@@ -52,7 +62,18 @@
 module Detect_Pitch #(
     parameter int BIT_WIDTH = 24,
     parameter int ONES_BIT  = BIT_WIDTH/2,
-    parameter int HOP       = 16
+    parameter int HOP       = 16,
+
+    // Algorithm configuration (set these for the system; the defaults are the
+    // production values.  Tests override them with a small configuration so a
+    // run takes ~10^5 cycles instead of ~10^7.)
+    parameter int  FRAME_LEN = 1920,     // samples per frame buffer
+    parameter int  W         = 900,      // YIN window length
+    parameter int  TAU_MIN   = 32,       // smallest lag searched
+    parameter int  TAU_MAX   = 960,      // lags 0 .. TAU_MAX-1 are computed
+    parameter int  FS        = 48000,    // sample rate in Hz
+    parameter real THRESHOLD = 0.1,      // CMNDF threshold
+    parameter logic [BIT_WIDTH-1:0] AUTOCOR_BASE = 'h004000
 ) (
     input  logic                        rst_n,
     input  logic                        clk,
@@ -80,17 +101,6 @@ module Detect_Pitch #(
 );
 
     // ------------------------------------------------------------------------
-    // Algorithm configuration (set these for the system)
-    // ------------------------------------------------------------------------
-    localparam int  FRAME_LEN = 1920;     // samples per frame buffer
-    localparam int  W         = 900;      // YIN window length
-    localparam int  TAU_MIN   = 32;       // smallest lag searched
-    localparam int  TAU_MAX   = 960;      // lags 0 .. TAU_MAX-1 are computed
-    localparam int  FS        = 48000;    // sample rate in Hz
-    localparam real THRESHOLD = 0.1;      // CMNDF threshold
-    localparam logic [BIT_WIDTH-1:0] AUTOCOR_BASE = 'h004000;
-
-    // ------------------------------------------------------------------------
     // Derived constants
     // ------------------------------------------------------------------------
     localparam int IDX_W    = $clog2(FRAME_LEN + 1);
@@ -103,6 +113,8 @@ module Detect_Pitch #(
 
     localparam logic signed [BIT_WIDTH-1:0] ONE_W  = BIT_WIDTH'(1) << ONES_BIT;
     localparam logic signed [BIT_WIDTH-1:0] HALF_W = BIT_WIDTH'(1) << (ONES_BIT-1);
+    localparam logic signed [BIT_WIDTH-1:0] SAT_MAX = {1'b0, {(BIT_WIDTH-1){1'b1}}};
+    localparam logic signed [BIT_WIDTH-1:0] SAT_MIN = {1'b1, {(BIT_WIDTH-1){1'b0}}};
     localparam logic signed [BIT_WIDTH-1:0] TINY_S = BIT_WIDTH'(TINY);
     localparam logic signed [BIT_WIDTH-1:0] FSQ_W  = BIT_WIDTH'(FS_Q);
     localparam logic signed [BIT_WIDTH+2:0] SMAX   = (BIT_WIDTH+3)'((1 << (BIT_WIDTH-1)) - 1);
@@ -169,6 +181,15 @@ module Detect_Pitch #(
     logic       sub;                      // pass 1: removing old products
     logic       eph;                      // pass 2 energy term: 0 = remove, 1 = add
     logic       zbyp;                     // d' bypassed to 1.0 (mean == 0)
+    logic       nneg;                     // pass 1: x[n] is negative (product sign)
+
+    // res edge detector.  res_sr is a one-deep shift register of res: it keeps
+    // clocking in every state, so it always holds the value res had on the
+    // previous cycle.  res_posedge is high for exactly one cycle, in the same
+    // cycle res first reads 1 -- so val_in, which is valid when res rises, can
+    // be used directly in that cycle.
+    logic res_sr;
+    wire  res_posedge = res && !res_sr;
 
     logic [BIT_WIDTH-1:0]      base_q;    // latched frame_base
     logic [LAG_W-1:0]          tau;
@@ -209,6 +230,9 @@ module Detect_Pitch #(
     wire signed [BIT_WIDTH-1:0] vin_s    = val_in;
     wire                        vin_tiny = (vin_s <= TINY_S) && (vin_s >= -TINY_S);
     wire                        vin_zero = (val_in == '0);
+    // |val_in|, saturating (|x| <= 1.0 in practice, so saturation never triggers)
+    wire signed [BIT_WIDTH-1:0] vin_abs  = !vin_s[BIT_WIDTH-1] ? vin_s :
+                                           (vin_s == SAT_MIN)  ? SAT_MAX : -vin_s;
 
     // d(lag) = ref + lagged - 2 r(lag), clamped at 0, then >> D_SHIFT
     wire signed [BIT_WIDTH+2:0] d_raw = (BIT_WIDTH+3)'(ref_e) + (BIT_WIDTH+3)'(lagged)
@@ -237,7 +261,10 @@ module Detect_Pitch #(
     wire signed [BIT_WIDTH:0]   abs_a  = a24[BIT_WIDTH-1]    ? -a24_x    : a24_x;
     wire                        dneg   = snap_num[BIT_WIDTH] ^ a24[BIT_WIDTH-1];
     wire signed [BIT_WIDTH-1:0] tau_base = BIT_WIDTH'({min_tau, {ONES_BIT{1'b0}}});
-    wire signed [BIT_WIDTH-1:0] dlt_c  = (ans > HALF_W) ? HALF_W : (ans < -HALF_W) ? -HALF_W : ans;
+    // delta = sign * (|num| / |den2|): the CORDIC returns the magnitude (>= 0),
+    // clamp it to 0.5 and apply the sign here
+    wire signed [BIT_WIDTH-1:0] dlt_mag = ans[BIT_WIDTH-1] ? '0 : (ans > HALF_W) ? HALF_W : ans;
+    wire signed [BIT_WIDTH-1:0] dlt_c   = dneg ? -dlt_mag : dlt_mag;
 
     // ------------------------------------------------------------------------
     // Sequencer
@@ -246,6 +273,7 @@ module Detect_Pitch #(
         start_read   <= 1'b0;
         start_write  <= 1'b0;
         cordic_start <= 1'b0;
+        res_sr       <= res;                  // runs in every state, including reset
 
         if (!rst_n) begin
             state <= S_IDLE;
@@ -282,7 +310,7 @@ module Detect_Pitch #(
                     val_out     <= '0;
                     start_write <= 1'b1;
                     pend        <= 1'b1;
-                end else if (res) begin
+                end else if (res_posedge) begin
                     pend <= 1'b0;
                     if (tau == LAG_W'(TAU_MAX - 1)) begin
                         tau   <= '0;
@@ -299,13 +327,14 @@ module Detect_Pitch #(
                     address    <= addr_next;
                     start_read <= 1'b1;
                     pend       <= 1'b1;
-                end else if (res) begin
+                end else if (res_posedge) begin
                     pend <= 1'b0;
                     if (vin_tiny) begin                // every product is 0
                         state <= S_NNEXT;
                     end else begin
-                        A_out <= vin_s;                // 1 / x[n]
+                        A_out <= vin_abs;              // 1 / |x[n]|  (denominator >= 0)
                         B_out <= ONE_W;
+                        nneg  <= vin_s[BIT_WIDTH-1];   // remember the sign of x[n]
                         tau   <= '0;
                         ret   <= S_NREC;
                         state <= S_CALL;
@@ -314,7 +343,7 @@ module Detect_Pitch #(
             end
 
             S_NREC: begin
-                A_out <= ans;                          // reciprocal, held for all lags
+                A_out <= ans;                          // 1/|x[n]|, held for all lags
                 state <= S_TREAD;
             end
 
@@ -323,12 +352,12 @@ module Detect_Pitch #(
                     address    <= addr_next;
                     start_read <= 1'b1;
                     pend       <= 1'b1;
-                end else if (res) begin
+                end else if (res_posedge) begin
                     pend <= 1'b0;
                     if (vin_zero) begin
                         state <= S_TNEXT;
                     end else begin
-                        B_out <= vin_s;                // x[n-lag] / (1/x[n])
+                        B_out <= vin_s;                // x[n-lag] / (1/|x[n]|) = x[n-lag]*|x[n]|
                         ret   <= S_TPROD;
                         state <= S_CALL;
                     end
@@ -336,7 +365,7 @@ module Detect_Pitch #(
             end
 
             S_TPROD: begin
-                val_out <= ans;
+                val_out <= nneg ? (-ans) : ans;        // apply the sign of x[n]
                 state   <= state_t'((ans == '0) ? S_TNEXT : S_RRD);
             end
 
@@ -345,7 +374,7 @@ module Detect_Pitch #(
                     address    <= addr_next;
                     start_read <= 1'b1;
                     pend       <= 1'b1;
-                end else if (res) begin
+                end else if (res_posedge) begin
                     pend    <= 1'b0;
                     val_out <= sub ? (val_in - val_out) : (val_in + val_out);
                     state   <= S_RWR;
@@ -357,7 +386,7 @@ module Detect_Pitch #(
                     address     <= addr_next;
                     start_write <= 1'b1;
                     pend        <= 1'b1;
-                end else if (res) begin
+                end else if (res_posedge) begin
                     pend  <= 1'b0;
                     state <= S_TNEXT;
                 end
@@ -404,7 +433,7 @@ module Detect_Pitch #(
                     address    <= addr_next;
                     start_read <= 1'b1;
                     pend       <= 1'b1;
-                end else if (res) begin
+                end else if (res_posedge) begin
                     pend   <= 1'b0;
                     ref_e  <= vin_s;
                     lagged <= vin_s;
@@ -419,7 +448,7 @@ module Detect_Pitch #(
                     address    <= addr_next;
                     start_read <= 1'b1;
                     pend       <= 1'b1;
-                end else if (res) begin
+                end else if (res_posedge) begin
                     pend <= 1'b0;
                     if (vin_tiny) begin                // square is 0
                         if (!eph) begin
@@ -429,8 +458,8 @@ module Detect_Pitch #(
                             state <= S_R2RD;
                         end
                     end else begin
-                        val_out <= val_in;             // keep x
-                        A_out   <= vin_s;              // 1 / x
+                        val_out <= vin_abs;            // keep |x|
+                        A_out   <= vin_abs;            // 1 / |x|  (denominator >= 0)
                         B_out   <= ONE_W;
                         ret     <= S_EREC;
                         state   <= S_CALL;
@@ -439,7 +468,7 @@ module Detect_Pitch #(
             end
 
             S_EREC: begin
-                A_out <= ans;                          // x / (1/x)
+                A_out <= ans;                          // |x| / (1/|x|) = x^2
                 B_out <= $signed(val_out);
                 ret   <= S_ESQ;
                 state <= S_CALL;
@@ -460,7 +489,7 @@ module Detect_Pitch #(
                     address    <= addr_next;
                     start_read <= 1'b1;
                     pend       <= 1'b1;
-                end else if (res) begin
+                end else if (res_posedge) begin
                     pend   <= 1'b0;
                     dprime <= d_raw[BIT_WIDTH+2] ? '0 : d_sh;
                     state  <= S_MEAN;
@@ -479,7 +508,9 @@ module Detect_Pitch #(
             end
 
             S_MUPD: begin
-                M     <= m_n[BIT_WIDTH] ? '0 : m_n[BIT_WIDTH-1:0];
+                // M is a denominator in S_DPR: keep it in [0, SAT_MAX]
+                M     <= m_n[BIT_WIDTH]   ? '0 :
+                         m_n[BIT_WIDTH-1] ? BIT_WIDTH'(SAT_MAX) : m_n[BIT_WIDTH-1:0];
                 state <= state_t'((tau >= LAG_W'(TAU_MIN - 1)) ? S_DPR : S_P2NEXT);
             end
 
@@ -529,9 +560,9 @@ module Detect_Pitch #(
                 if (min_tau > LAG_W'(TAU_MIN) && snap_den != '0 && snap_num != '0) begin
                     if (abs_n >= abs_a) begin          // |delta| clamped to 0.5
                         A_out <= dneg ? (tau_base - HALF_W) : (tau_base + HALF_W);
-                    end else begin                     // delta = num / (2 den)
-                        A_out <= a24;
-                        B_out <= snap_num[BIT_WIDTH-1:0];
+                    end else begin                     // |delta| = |num| / |2 den|, sign in dlt_c
+                        A_out <= abs_a[BIT_WIDTH-1:0];
+                        B_out <= abs_n[BIT_WIDTH-1:0];
                         ret   <= S_FIN_D;
                     end
                 end else begin

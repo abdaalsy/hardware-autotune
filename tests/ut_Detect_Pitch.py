@@ -1,181 +1,293 @@
+"""
+cocotb test for Detect_Pitch (YIN, streaming, incremental autocorrelation).
+
+Why a small configuration
+-------------------------
+With the production constants (FRAME_LEN=1920, W=900, TAU_MAX=960) the first
+run does ~860k products, each needing a CORDIC division plus memory traffic:
+~40 million cycles.  That is not a deadlock, it is just far beyond what a
+cocotb simulation can do.  This test therefore builds the DUT with the small
+configuration in CONFIG (~10^5 cycles per run) -- the algorithm is identical.
+
+What is modelled
+----------------
+* Memory  : dict-backed.  `res` idles HIGH (like the real memory controller).
+            After a request it stays high for 1-3 more cycles (arbitration),
+            then drops for 1-3 cycles, then rises with val_in valid -- the DUT
+            must wait for that rising edge.  A DUT that only looks at the LEVEL
+            of res sees the stale idle-high value and reads junk.
+* CORDIC  : ideal Q12.12 divider (B/A, truncated), 3-10 busy cycles.
+* Both responders sample on the falling clock edge (no races with the DUT).
+
+What is checked
+---------------
+* Every memory address is 4-byte aligned and inside the frame buffer or the
+  autocorrelation region; no overlapping requests; CORDIC opcode is divide and
+  never divides by zero, and the DENOMINATOR (A_out) is never negative (the real
+  CORDIC engine can't handle that; numerators may be signed).
+* The autocorrelation region is junk before the first run and must be zeroed /
+  rebuilt by the DUT: r(lag) in memory must match a floating point reference
+  after EVERY run (this also checks the incremental add-new / remove-old path
+  on the 2nd and 3rd run of each tone).
+* Detected pitch is within PITCH_TOL of the tone frequency after every run.
+
+Between tones the DUT is reset, because the frame contract (each run sees the
+previous frame shifted by HOP samples) is broken when the tone changes.
+
+    python tests/ut_Detect_Pitch.py          # from the project root
+"""
+
 import os
-import random
 import math
+import random
 import cocotb
 from pathlib import Path
 from cocotb.clock import Clock
 from cocotb_tools.runner import get_runner
-from cocotb.triggers import RisingEdge, ClockCycles
+from cocotb.triggers import FallingEdge
 
-# Fixed-point scaling factor (ONES_BIT = 12 -> 2^12 = 4096)
-SCALE = 4096
+# -----------------------------------------------------------------------------
+# DUT configuration (passed to the DUT as parameters AND used by the checks)
+# -----------------------------------------------------------------------------
+CONFIG = dict(HOP=16, FRAME_LEN=128, W=64, TAU_MIN=8, TAU_MAX=48, FS=8000)
+HOP, FRAME_LEN, W = CONFIG["HOP"], CONFIG["FRAME_LEN"], CONFIG["W"]
+TAU_MIN, TAU_MAX, FS = CONFIG["TAU_MIN"], CONFIG["TAU_MAX"], CONFIG["FS"]
+
+FRAME_BASE = 0x000000
+NEG_DEN_CALLS = {}               # DUT return-state code -> number of negative-denominator calls
+AUTOCOR_BASE = 0x004000          # DUT default
+TONES_HZ = [250.0, 330.0, 440.0, 800.0]   # periods 32, 24.2, 18.2, 10 samples
+RUNS_PER_TONE = 3                # 1 first run + 2 incremental runs
+AMPLITUDE = 0.8
+PITCH_TOL = 0.03                 # 3 %
+AUTOCOR_TOL = 0.05               # absolute, in units of the normalised signal^2
+
+# Fixed-point (Q12.12, 24 bit)
+ONES_BIT = 12
+SCALE = 1 << ONES_BIT
+MASK = (1 << 24) - 1
+
 
 def float_to_q12_12(val):
     scaled = round(val * SCALE)
-    if scaled >= (1 << 23):
-        scaled = (1 << 23) - 1
-    elif scaled < -(1 << 23):
-        scaled = -(1 << 23)
-    return scaled & 0xFFFFFF
+    scaled = max(-(1 << 23), min((1 << 23) - 1, scaled))
+    return scaled & MASK
+
 
 def q12_12_to_float(val):
-    if val & (1 << 23):  # Negative sign bit (24-bit width)
+    if val & (1 << 23):
         val -= (1 << 24)
     return val / SCALE
 
 
-# --- Background Responders ---
+def to_signed(v):
+    v &= MASK
+    return v - (1 << 24) if v & (1 << 23) else v
 
-async def memory_responder(dut, memory_dict):
-    """Responds to memory read and write requests from Detect_Pitch."""
+
+# -----------------------------------------------------------------------------
+# Background responders
+# -----------------------------------------------------------------------------
+def addr_ok(addr):
+    if addr % 4:
+        return False
+    in_frame = FRAME_BASE <= addr < FRAME_BASE + 4 * FRAME_LEN
+    in_ac = AUTOCOR_BASE <= addr < AUTOCOR_BASE + 4 * TAU_MAX
+    return in_frame or in_ac
+
+
+async def memory_responder(dut, memory, errors, stats):
+    """Memory controller model: res idles high; after a request it stays high
+    for a few cycles, drops, then rises again with val_in valid."""
+    dut.res.value = 1
+    pending = None                       # [cycles_until_drop, cycles_low, value]
     while True:
-        await RisingEdge(dut.clk)
-        dut.res.value = 0
-        if dut.start_read.value == 1:
-            addr = int(dut.address.value)
-            # Retrieve sample from frame buffer or memory dict (default to 0)
-            val = memory_dict.get(addr, 0)
-            dut.val_in.value = val & 0xFFFFFF
-            await RisingEdge(dut.clk)
-            dut.res.value = 1
-            await RisingEdge(dut.clk)
-            dut.res.value = 0
-        elif dut.start_write.value == 1:
-            addr = int(dut.address.value)
-            val = int(dut.val_out.value)
-            memory_dict[addr] = val
-            await RisingEdge(dut.clk)
-            dut.res.value = 1
-            await RisingEdge(dut.clk)
-            dut.res.value = 0
+        await FallingEdge(dut.clk)
 
+        if pending is not None:
+            if pending[0] > 0:                       # still idle-high, not yet serving
+                pending[0] -= 1
+                if pending[0] == 0:
+                    dut.res.value = 0
+            else:                                    # res low: serving
+                pending[1] -= 1
+                if pending[1] == 0:
+                    dut.val_in.value = pending[2]    # data valid when res rises
+                    dut.res.value = 1
+                    pending = None
 
-async def cordic_responder(dut):
-    """Emulates the CORDIC engine executing division (B / A) on cordic_start."""
-    while True:
-        await RisingEdge(dut.clk)
-        if dut.cordic_start.value == 1:
-            dut.cordic_busy.value = 1
-            
-            # Emulate pipeline/iteration latency
-            for _ in range(8):
-                await RisingEdge(dut.clk)
-                
-            a_val = int(dut.A_out.value)
-            b_val = int(dut.B_out.value)
-            
-            # Handle signed conversion for 24-bit inputs
-            if a_val & (1 << 23): a_val -= (1 << 24)
-            if b_val & (1 << 23): b_val -= (1 << 24)
-            
-            # Compute division: B / A in Q12.12
-            a_float = a_val / SCALE
-            b_float = b_val / SCALE
-            
-            if abs(a_float) < 1e-6:
-                ans_val = 0
+        rd = int(dut.start_read.value)
+        wr = int(dut.start_write.value)
+        if rd or wr:
+            addr = int(dut.address.value)
+            if rd and wr:
+                errors.append("start_read and start_write asserted together")
+            if pending is not None:
+                errors.append(f"request to 0x{addr:06x} while a previous one is outstanding")
+            if not addr_ok(addr):
+                errors.append(f"bad memory address 0x{addr:06x} (unaligned or outside frame/autocorr regions)")
+            if rd:
+                if addr not in memory:
+                    errors.append(f"read of never-written address 0x{addr:06x}")
+                val = memory.get(addr, 0)
+                stats["reads"] += 1
             else:
-                ans_val = round((b_float / a_float) * SCALE)
-                
-            if ans_val >= (1 << 23): ans_val = (1 << 23) - 1
-            if ans_val < -(1 << 23): ans_val = -(1 << 23)
-            
-            dut.ans.value = ans_val & 0xFFFFFF
-
-            # Wait some cycles to simulate the cordic run
-            await ClockCycles(dut.clk, 24)
-            dut.cordic_busy.value = 0
+                memory[addr] = int(dut.val_out.value)
+                val = random.getrandbits(24)
+                stats["writes"] += 1
+            dut.val_in.value = random.getrandbits(24)      # junk until the response
+            pending = [random.randint(1, 3), random.randint(1, 3), val & MASK]
 
 
-# --- Main Test Sequence ---
+async def cordic_responder(dut, errors, stats):
+    """Ideal Q12.12 divider, B/A truncated toward zero.  ans is junk while busy."""
+    dut.cordic_busy.value = 0
+    cnt = 0
+    result = 0
+    while True:
+        await FallingEdge(dut.clk)
 
+        if cnt > 0:
+            cnt -= 1
+            if cnt == 0:
+                dut.ans.value = result & MASK
+                dut.cordic_busy.value = 0
+
+        if int(dut.cordic_start.value):
+            a = to_signed(int(dut.A_out.value))
+            b = to_signed(int(dut.B_out.value))
+            if int(dut.opcode.value) != 0:
+                errors.append("CORDIC opcode is not divide (0)")
+            if cnt > 0:
+                errors.append("cordic_start while CORDIC busy")
+            if a < 0:
+                code = int(dut.ret.value)
+                NEG_DEN_CALLS[code] = NEG_DEN_CALLS.get(code, 0) + 1
+            if a == 0:
+                errors.append("CORDIC division by zero")
+                result = 0
+            else:
+                q = (abs(b) << ONES_BIT) // abs(a)
+                result = -q if (a < 0) != (b < 0) else q
+                result = max(-(1 << 23), min((1 << 23) - 1, result))
+            stats["cordic"] += 1
+            dut.ans.value = random.getrandbits(24)
+            dut.cordic_busy.value = 1
+            cnt = random.randint(3, 10)
+
+
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+async def reset_dut(dut):
+    dut.rst_n.value = 0
+    dut.start.value = 0
+    dut.frame_base.value = FRAME_BASE
+    for _ in range(5):
+        await FallingEdge(dut.clk)
+    dut.rst_n.value = 1
+    for _ in range(3):
+        await FallingEdge(dut.clk)
+
+
+def reference_autocorr(frame_q):
+    """r(lag) over the last W samples of the frame, using the quantised samples."""
+    x = [v / SCALE for v in frame_q]
+    return [sum(x[n] * x[n - lag] for n in range(FRAME_LEN - W, FRAME_LEN))
+            for lag in range(TAU_MAX)]
+
+
+async def run_detect(dut, memory, errors, stats, frame_q, label):
+    """Load one frame, run the detector, return (pitch_hz, [r(lag) from memory])."""
+    for i, v in enumerate(frame_q):
+        memory[FRAME_BASE + 4 * i] = v & MASK
+    errors.clear()
+    NEG_DEN_CALLS.clear()
+    for k in stats:
+        stats[k] = 0
+
+    dut.frame_base.value = FRAME_BASE
+    dut.start.value = 1
+    await FallingEdge(dut.clk)
+    dut.start.value = 0
+    assert int(dut.busy.value) == 1, f"[{label}] busy did not assert after start"
+
+    timeout = 2_000_000
+    cycles = 0
+    while int(dut.busy.value) == 1:
+        await FallingEdge(dut.clk)
+        cycles += 1
+        if cycles % 50000 == 0:
+            dut._log.info(f"[{label}] ... {cycles} cycles, n={int(dut.n.value)} "
+                          f"tau={int(dut.tau.value)} state={int(dut.state.value)}")
+        if cycles > timeout:
+            raise AssertionError(
+                f"[{label}] timeout after {timeout} cycles: n={int(dut.n.value)} "
+                f"tau={int(dut.tau.value)} state={int(dut.state.value)}")
+
+    assert not errors, f"[{label}] protocol errors:\n  " + "\n  ".join(errors[:10])
+    assert not NEG_DEN_CALLS, (
+        f"[{label}] CORDIC called with a NEGATIVE denominator {sum(NEG_DEN_CALLS.values())} times "
+        f"(count per DUT return-state code: {NEG_DEN_CALLS})")
+
+    pitch_hz = q12_12_to_float(int(dut.pitch.value))
+    ac = [q12_12_to_float(memory[AUTOCOR_BASE + 4 * lag]) for lag in range(TAU_MAX)]
+    dut._log.info(f"[{label}] {cycles} cycles, {stats['reads']} reads, {stats['writes']} writes, "
+                  f"{stats['cordic']} CORDIC calls -> pitch {pitch_hz:.2f} Hz")
+    return pitch_hz, ac
+
+
+# -----------------------------------------------------------------------------
+# Test
+# -----------------------------------------------------------------------------
 @cocotb.test()
 async def test_detect_pitch_frequencies(dut):
-    clock = Clock(dut.clk, 20, unit="ns")
-    cocotb.start_soon(clock.start())
+    cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())   # 50 MHz
 
-    # Shared memory dictionary model
     memory = {}
+    errors = []
+    stats = {"reads": 0, "writes": 0, "cordic": 0}
+    cocotb.start_soon(memory_responder(dut, memory, errors, stats))
+    cocotb.start_soon(cordic_responder(dut, errors, stats))
 
-    # Start background responders
-    cocotb.start_soon(memory_responder(dut, memory))
-    cocotb.start_soon(cordic_responder(dut))
-
-    # Initialize DUT signals
-    dut.rst_n.value = 1
+    dut.rst_n.value = 0
     dut.start.value = 0
-    dut.frame_base.value = 0x000000
+    dut.frame_base.value = FRAME_BASE
     dut.val_in.value = 0
-    dut.res.value = 0
     dut.ans.value = 0
     dut.cordic_busy.value = 0
 
-    # Hardware Reset
-    dut.rst_n.value = 0
-    await ClockCycles(dut.clk, 5)
-    dut.rst_n.value = 1
-    await ClockCycles(dut.clk, 5)
+    for tone in TONES_HZ:
+        # continuous tone; run k sees samples [k*HOP, k*HOP + FRAME_LEN)
+        total = FRAME_LEN + HOP * RUNS_PER_TONE
+        sig_q = [to_signed(float_to_q12_12(AMPLITUDE * math.sin(2 * math.pi * tone * i / FS)))
+                 for i in range(total)]
 
-    sample_rate = 16000  # 16 kHz sample rate
-    frame_size = 1920
-    frame_base = 0x000000
-    test_frequencies = [220.0, 440.0, 880.0]  # A3, A4, A5
+        await reset_dut(dut)                       # new tone = new first run
+        for lag in range(TAU_MAX):                 # junk the DUT must overwrite
+            memory[AUTOCOR_BASE + 4 * lag] = random.getrandbits(24)
 
-    for target_freq in test_frequencies:
-        dut._log.info(f"Generating sine wave for target frequency: {target_freq} Hz")
-        
-        # Populate frame buffer in memory with Q12.12 sine wave samples (4-byte word offset)
-        for i in range(frame_size):
-            t = i / sample_rate
-            sine_val = math.sin(2 * math.pi * target_freq * t)
-            fixed_val = float_to_q12_12(sine_val)
-            addr = frame_base + (i * 4)
-            memory[addr] = fixed_val
+        for k in range(RUNS_PER_TONE):
+            frame_q = sig_q[k * HOP: k * HOP + FRAME_LEN]
+            label = f"{tone:.0f} Hz run {k}" + (" (first)" if k == 0 else " (incremental)")
+            pitch_hz, ac = await run_detect(dut, memory, errors, stats, frame_q, label)
 
-        # Clear autocorrelation memory region at 0x004000 before starting
-        for lag in range(100):
-            memory[0x004000 + (lag * 4)] = 0
+            ref = reference_autocorr(frame_q)
+            worst = max(range(TAU_MAX), key=lambda l: abs(ac[l] - ref[l]))
+            err = abs(ac[worst] - ref[worst])
+            dut._log.info(f"[{label}] worst autocorr error {err:.4f} at lag {worst} "
+                          f"(r={ref[worst]:.3f}); pitch error {100 * (pitch_hz - tone) / tone:+.2f} %")
+            assert err <= AUTOCOR_TOL, (
+                f"[{label}] r({worst}) = {ac[worst]:.4f} in memory, reference {ref[worst]:.4f}")
+            assert abs(pitch_hz - tone) <= PITCH_TOL * tone, (
+                f"[{label}] pitch {pitch_hz:.2f} Hz, expected {tone:.1f} Hz +/- {100 * PITCH_TOL:.0f}%")
 
-        # Trigger pitch detection
-        dut.frame_base.value = frame_base
-        await RisingEdge(dut.clk)
-        dut.start.value = 1
-        await ClockCycles(dut.clk, 2)
-        dut.start.value = 0
-
-        dut._log.info("Pitch detection started, waiting for busy to deassert...")
-
-        # Wait for DUT to assert busy
-        while dut.busy.value == 0:
-            await RisingEdge(dut.clk)
-
-        # Wait for DUT to finish processing (busy goes low)
-        timeout_cycles = 200000
-        cycles_waited = 0
-        while dut.busy.value == 1:
-            await RisingEdge(dut.clk)
-            cycles_waited += 1
-            if cycles_waited > timeout_cycles:
-                dut._log.error("Timeout! Detect_Pitch stuck in busy state.")
-                assert False, "DUT FSM deadlock detected!"
-
-        # Verify autocorrelation values were written starting at 0x004000
-        assert 0x004000 in memory, "Autocorrelation result at base 0x004000 was not written!"
-
-        # Read detected pitch output
-        detected_pitch_raw = int(dut.pitch.value)
-        detected_pitch = q12_12_to_float(detected_pitch_raw)
-
-        dut._log.info(f"Finished in {cycles_waited} cycles. Target: {target_freq} Hz | Detected Pitch: {detected_pitch:.2f} Hz")
-
-        # Assert detected pitch is within a reasonable tolerance of the target frequency
-        tolerance = target_freq * 0.10  # 10% tolerance
-        assert abs(detected_pitch - target_freq) <= tolerance, \
-            f"Pitch detection failed! Expected ~{target_freq} Hz, got {detected_pitch:.2f} Hz"
-
-    dut._log.info("All frequency sweep test cases passed successfully!")
+    dut._log.info("All tones passed")
 
 
+# -----------------------------------------------------------------------------
+# Runner
+# -----------------------------------------------------------------------------
 def test_runner():
     sim = os.getenv("SIM", "icarus")
     sources = ["src/Detect_Pitch.sv"]
@@ -184,11 +296,18 @@ def test_runner():
     runner.build(
         sources=sources,
         hdl_toplevel="Detect_Pitch",
+        parameters=CONFIG,                 # small configuration, see top of file
         always=True,
         timescale=("1ns", "1ps"),
-        waves=True
+        waves=True,
     )
-    runner.test(hdl_toplevel="Detect_Pitch", test_module="ut_Detect_Pitch", waves=True)
+    runner.test(
+        hdl_toplevel="Detect_Pitch",
+        test_module="ut_Detect_Pitch",
+        test_dir=str(Path(__file__).resolve().parent),
+        waves=True,
+    )
+
 
 if __name__ == "__main__":
     test_runner()
