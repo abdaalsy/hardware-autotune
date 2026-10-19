@@ -5,6 +5,12 @@
 //
 // Number format : signed Q(BIT_WIDTH-ONES_BIT).ONES_BIT (Q12.12), samples
 //                 normalised to |x| <= 1.0.  pitch is unsigned Q12.12 in Hz.
+//                 period_samples is BIT_WIDTH/2 bits wide and holds only the
+//                 WHOLE number of samples in one period (no fraction), rounded
+//                 to the nearest sample: round(tau + interpolation correction).
+//                 It is derived from the same refined period that gives
+//                 pitch = FS / period (FS = 48000 by default) and does not
+//                 depend on FS itself.
 //
 // Memory handshake
 //   A transaction is started by pulsing start_read / start_write with
@@ -55,7 +61,7 @@
 //           parabolic interpolation, pitch = FS / tau.  Pass 2 may stop as soon
 //           as the pitch is decided, because every r(lag) is already final.
 //
-// `pitch` is valid when `busy` falls.
+// `pitch` and `period_samples` are valid when `busy` falls.
 // ============================================================================
 `default_nettype none
 
@@ -80,7 +86,8 @@ module Detect_Pitch #(
     input  logic                        start,
     input  logic [BIT_WIDTH-1:0]        frame_base,   // start address of the frame to process
     output logic                        busy,
-    output logic [BIT_WIDTH-1:0]        pitch,
+    output logic [BIT_WIDTH-1:0]        pitch,            // Hz, Q12.12
+    output logic [BIT_WIDTH/2-1:0]      period_samples,   // whole samples per period
 
     // Memory interface
     output logic                        start_read,
@@ -103,6 +110,7 @@ module Detect_Pitch #(
     // ------------------------------------------------------------------------
     // Derived constants
     // ------------------------------------------------------------------------
+    localparam int PERIOD_W = BIT_WIDTH/2;             // width of period_samples
     localparam int IDX_W    = $clog2(FRAME_LEN + 1);
     localparam int LAG_W    = $clog2(TAU_MAX);
     localparam int D_SHIFT  = 2;                       // d is held >>2 so it fits 24 bits
@@ -281,6 +289,7 @@ module Detect_Pitch #(
             busy  <= 1'b0;
             warm  <= 1'b0;
             pitch <= '0;
+            period_samples <= '0;
         end else begin
             unique case (state)
             // ----------------------------------------------------------------
@@ -578,8 +587,12 @@ module Detect_Pitch #(
             end
 
             S_FIN_P: begin
-                pitch <= BIT_WIDTH'(ans_u) << FS_SHIFT;
-                state <= S_DONE;
+                // A_out still holds the refined period (tau + delta, Q12.12) that
+                // the division above used as its denominator: pitch = FS / A_out.
+                // period_samples = nearest whole sample: add 0.5, drop the fraction.
+                period_samples <= PERIOD_W'((BIT_WIDTH'(A_out) + BIT_WIDTH'(HALF_W)) >> ONES_BIT);
+                pitch          <= BIT_WIDTH'(ans_u) << FS_SHIFT;
+                state          <= S_DONE;
             end
 
             // ----------------------------------------------------------------

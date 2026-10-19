@@ -8,6 +8,9 @@ run does ~860k products, each needing a CORDIC division plus memory traffic:
 ~40 million cycles.  That is not a deadlock, it is just far beyond what a
 cocotb simulation can do.  This test therefore builds the DUT with the small
 configuration in CONFIG (~10^5 cycles per run) -- the algorithm is identical.
+It keeps the real sample rate (FS = 48000), so pitch / period are checked at
+the rate the design is used at; only the frame / window / lag range are shrunk
+(lags 32..111 -> pitches of ~430 Hz and up).
 
 What is modelled
 ----------------
@@ -30,6 +33,11 @@ What is checked
   after EVERY run (this also checks the incremental add-new / remove-old path
   on the 2nd and 3rd run of each tone).
 * Detected pitch is within PITCH_TOL of the tone frequency after every run.
+* period_samples is BIT_WIDTH/2 bits wide and holds the WHOLE number of samples
+  per period, ROUNDED to the nearest sample: it must be within PITCH_TOL of
+  FS/tone (plus half a sample) and equal round(FS / pitch).  FS/pitch is only
+  uncertain by ~1e-5 (pitch quantisation), so ROUND_TOL = 0.02 % is used and
+  only values that fall that close to a .5 boundary may round either way.
 
 Between tones the DUT is reset, because the frame contract (each run sees the
 previous frame shifted by HOP samples) is broken when the tone changes.
@@ -49,17 +57,18 @@ from cocotb.triggers import FallingEdge
 # -----------------------------------------------------------------------------
 # DUT configuration (passed to the DUT as parameters AND used by the checks)
 # -----------------------------------------------------------------------------
-CONFIG = dict(HOP=16, FRAME_LEN=128, W=64, TAU_MIN=8, TAU_MAX=48, FS=8000)
+CONFIG = dict(HOP=16, FRAME_LEN=224, W=96, TAU_MIN=32, TAU_MAX=112, FS=48000)
 HOP, FRAME_LEN, W = CONFIG["HOP"], CONFIG["FRAME_LEN"], CONFIG["W"]
 TAU_MIN, TAU_MAX, FS = CONFIG["TAU_MIN"], CONFIG["TAU_MAX"], CONFIG["FS"]
 
 FRAME_BASE = 0x000000
 NEG_DEN_CALLS = {}               # DUT return-state code -> number of negative-denominator calls
 AUTOCOR_BASE = 0x004000          # DUT default
-TONES_HZ = [250.0, 330.0, 440.0, 800.0]   # periods 32, 24.2, 18.2, 10 samples
+TONES_HZ = [500.0, 700.0, 1200.0]         # periods 96, 68.6, 40 samples at 48 kHz
 RUNS_PER_TONE = 3                # 1 first run + 2 incremental runs
 AMPLITUDE = 0.8
 PITCH_TOL = 0.03                 # 3 %
+ROUND_TOL = 0.0002              # uncertainty of FS/pitch vs the DUT's internal period, 0.02 %
 AUTOCOR_TOL = 0.05               # absolute, in units of the normalised signal^2
 
 # Fixed-point (Q12.12, 24 bit)
@@ -198,7 +207,7 @@ def reference_autocorr(frame_q):
 
 
 async def run_detect(dut, memory, errors, stats, frame_q, label):
-    """Load one frame, run the detector, return (pitch_hz, [r(lag) from memory])."""
+    """Load one frame, run the detector, return (pitch_hz, whole-sample period, [r(lag) from memory])."""
     for i, v in enumerate(frame_q):
         memory[FRAME_BASE + 4 * i] = v & MASK
     errors.clear()
@@ -231,10 +240,13 @@ async def run_detect(dut, memory, errors, stats, frame_q, label):
         f"(count per DUT return-state code: {NEG_DEN_CALLS})")
 
     pitch_hz = q12_12_to_float(int(dut.pitch.value))
+    assert len(dut.period_samples) == 24 // 2, "period_samples should be BIT_WIDTH/2 bits wide"
+    period = int(dut.period_samples.value)                  # whole samples per period
     ac = [q12_12_to_float(memory[AUTOCOR_BASE + 4 * lag]) for lag in range(TAU_MAX)]
     dut._log.info(f"[{label}] {cycles} cycles, {stats['reads']} reads, {stats['writes']} writes, "
-                  f"{stats['cordic']} CORDIC calls -> pitch {pitch_hz:.2f} Hz")
-    return pitch_hz, ac
+                  f"{stats['cordic']} CORDIC calls -> pitch {pitch_hz:.2f} Hz, "
+                  f"period {period} samples")
+    return pitch_hz, period, ac
 
 
 # -----------------------------------------------------------------------------
@@ -270,17 +282,28 @@ async def test_detect_pitch_frequencies(dut):
         for k in range(RUNS_PER_TONE):
             frame_q = sig_q[k * HOP: k * HOP + FRAME_LEN]
             label = f"{tone:.0f} Hz run {k}" + (" (first)" if k == 0 else " (incremental)")
-            pitch_hz, ac = await run_detect(dut, memory, errors, stats, frame_q, label)
+            pitch_hz, period, ac = await run_detect(dut, memory, errors, stats, frame_q, label)
 
             ref = reference_autocorr(frame_q)
             worst = max(range(TAU_MAX), key=lambda l: abs(ac[l] - ref[l]))
             err = abs(ac[worst] - ref[worst])
+            exp_period = FS / tone
             dut._log.info(f"[{label}] worst autocorr error {err:.4f} at lag {worst} "
-                          f"(r={ref[worst]:.3f}); pitch error {100 * (pitch_hz - tone) / tone:+.2f} %")
+                          f"(r={ref[worst]:.3f}); pitch error {100 * (pitch_hz - tone) / tone:+.2f} %; "
+                          f"period_samples {period} vs FS/tone = {exp_period:.3f}, FS/pitch = {FS / pitch_hz:.3f}")
             assert err <= AUTOCOR_TOL, (
                 f"[{label}] r({worst}) = {ac[worst]:.4f} in memory, reference {ref[worst]:.4f}")
             assert abs(pitch_hz - tone) <= PITCH_TOL * tone, (
                 f"[{label}] pitch {pitch_hz:.2f} Hz, expected {tone:.1f} Hz +/- {100 * PITCH_TOL:.0f}%")
+            assert abs(period - exp_period) <= PITCH_TOL * exp_period + 0.5, (
+                f"[{label}] period_samples {period}, expected about {exp_period:.3f} samples")
+            # nearest whole sample of the refined period that produced `pitch`
+            p_from_pitch = FS / pitch_hz
+            lo = math.floor(p_from_pitch * (1 - ROUND_TOL) + 0.5)
+            hi = math.floor(p_from_pitch * (1 + ROUND_TOL) + 0.5)
+            assert lo <= period <= hi, (
+                f"[{label}] period_samples {period} is not round(FS/pitch) "
+                f"= round({p_from_pitch:.4f}) = {lo}..{hi}")
 
     dut._log.info("All tones passed")
 

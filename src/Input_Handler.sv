@@ -14,6 +14,7 @@ module Input_Handler #(
     input logic ws,
     input logic sd,
     input logic res_A,
+    output logic [BIT_WIDTH-1:0] sample_out,
     output logic ready,
     output logic [23:0] address_A,
     output logic [BIT_WIDTH-1:0] val_A,
@@ -35,6 +36,7 @@ assign start_posedge = (start_sreg[1] == 1'b0 && start_sreg[0] == 1'b1);
 assign resA_posedge = (resA_sreg[1] == 1'b0 && resA_sreg[0] == 1'b1);
 assign address_A = address;
 assign ready = ~ready_n;
+assign sample_out = sample_in;
 
 I2S_Rx_Slave u_i2s_rx (
     .clk(clk),
