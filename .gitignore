@@ -7,3 +7,4 @@ vtr-verilog-to-routing/
 *.wav
 research/spectrogram.png research/vocals.png
 sim_build/
+test_runner.result.xml
