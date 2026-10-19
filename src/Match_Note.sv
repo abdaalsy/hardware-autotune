@@ -67,7 +67,7 @@ module Match_Note #(
     // Constants
     // -------------------------------------------------------------------------
     // Base address of the notes array (placeholder - change as needed).
-    localparam logic [BIT_WIDTH-1:0] notes_addr_base = 'h001000;
+    localparam logic [BIT_WIDTH-1:0] notes_addr_base = 'h10;
 
     localparam logic OP_DIV  = 1'b0;
     localparam logic OP_SQRT = 1'b1; // unused
