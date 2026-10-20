@@ -1,77 +1,98 @@
+"""Cocotb 2.x regression for the byte-addressed Memory_Controller.
+Run: SIM=icarus python -m pytest tests/test_Memory_Controller.py -s
+"""
 import os
-import cocotb
 from pathlib import Path
+
+import cocotb
 from cocotb.clock import Clock
+from cocotb.triggers import FallingEdge, RisingEdge, ClockCycles, Timer, with_timeout
 from cocotb_tools.runner import get_runner
-from cocotb.triggers import ClockCycles, RisingEdge, FallingEdge
+
+
+ROOT = Path(__file__).resolve().parent.parent
+
 
 def test_runner():
-    sim = os.getenv("SIM", "icarus")
-    proj_root = Path(__file__).resolve().parent
-
-    sources = ["src/Memory_Controller.sv", "src/SPI_Master.sv"]
-    runner = get_runner(sim)
+    runner = get_runner(os.getenv("SIM", "icarus"))
     runner.build(
-        sources=sources,
+        sources=[ROOT / "src" / "Memory_Controller.sv"],
         hdl_toplevel="Memory_Controller",
-        always=True,
+        parameters={"BIT_WIDTH": 24, "DEPTH_WORDS": 8192},
         timescale=("1ns", "1ps"),
-        waves=True
+        always=True,
+        waves=True,
     )
-    runner.test(hdl_toplevel="Memory_Controller", test_module="test_memory_controller", waves=True)
+    runner.test(
+        hdl_toplevel="Memory_Controller",
+        test_module="test_Memory_Controller",
+        test_dir=Path(__file__).parent,
+        waves=True,
+    )
 
-async def setup_dut(dut):
-    """Initializes the clock, resets the DUT, and zeros all inputs."""
-    cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start()) # 50 MHz
 
-    # Initialize inputs
-    dut._log.info("Entering reset state...")
+async def setup(dut):
+    dut.clk.value = 0
     dut.rst_n.value = 0
     dut.start_read.value = 0
     dut.start_write.value = 0
     dut.address_in.value = 0
     dut.val_in.value = 0
-    dut.MISO.value = 0
-    
-    for _ in range(5):
-        await RisingEdge(dut.clk)
-
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await ClockCycles(dut.clk, 5)
+    await FallingEdge(dut.clk)
     dut.rst_n.value = 1
-    await RisingEdge(dut.clk)
-    dut._log.info("Exited reset state")
+    await ClockCycles(dut.clk, 2)
+
+
+async def transaction(dut, addr, value=None):
+    # Drive request away from the active clock edge.
+    await FallingEdge(dut.clk)
+    dut.address_in.value = addr
+    dut.start_read.value = 1 if value is None else 0
+    dut.start_write.value = 0 if value is None else 1
+    if value is not None:
+        dut.val_in.value = value
+    await with_timeout(RisingEdge(dut.res), 500, timeout_unit="ns")
+    await Timer(1, unit="ns")
+    result = int(dut.val_out.value) if value is None else None
+    await FallingEdge(dut.clk)
+    dut.start_read.value = 0
+    dut.start_write.value = 0
+    await ClockCycles(dut.clk, 3)  # includes WAIT_DROP return to IDLE
+    return result
+
 
 @cocotb.test()
-async def test_read(dut):
-    await setup_dut(dut)
-    test_addr = 0xAAAAAA
-    dut.address_in.value = test_addr
-    dut.start_read.value = 1
-    dut._log.info(f"Current state after pulsing rst_n: {dut.current_state.value}")
-    await FallingEdge(dut.res)
-    dut._log.info(f"Entered SERVICE state.")
-     
-    await RisingEdge(dut.res)
-    # ASSERTIONS FOR READ A
-    assert dut.command.value == 0x03, f"Expected Read Command (0x03), got {hex(dut.command.value)}"
-    assert dut.address.value == test_addr, f"Expected Address {hex(test_addr)}, got {hex(dut.address.value)}"
+async def test_read_write_and_sign(dut):
+    await setup(dut)
+    cases = {
+        0x10: 0x7FFFFF,
+        0x14: 0x800000,
+        0x18: 0x000000,
+        0x1C: 0xC00000,
+        0x810: 0x345678,
+        0x480C: 0xABCDEF,
+    }
+    for address, value in cases.items():
+        await transaction(dut, address, value=value)
+    for address, expected in cases.items():
+        received = await transaction(dut, address)
+        assert received == expected, (
+            f"RAM[{address:#08x}] expected {expected:#08x}, got {received:#08x}"
+        )
+    dut._log.info("BRAM read/write and 24-bit PCM bit patterns all pass")
+
 
 @cocotb.test()
-async def test_write(dut):
-    await setup_dut(dut)
-    test_addr = 0x111111
-    test_val = 0x555555
-    
-    dut.address_in.value = test_addr
-    dut.val_in.value = test_val
-    dut.start_write.value = 1
-    
-    await RisingEdge(dut.res)
-    # ASSERTIONS FOR WRITE A
-    assert dut.command.value == 0x02, f"Expected Write Command (0x02), got {hex(dut.command.value)}"
-    assert dut.address.value == test_addr, f"Expected Address {hex(test_addr)}, got {hex(dut.address.value)}"
-    
-    # Check that value_in was properly concatenated: {val_A, 8'h00}
-    expected_value_in = (test_val << 8) | 0x00
-    assert dut.value_in.value == expected_value_in, f"Expected Data {hex(expected_value_in)}, got {hex(dut.value_in.value)}"
-
+async def test_reset_preserves_ram_contents(dut):
+    await setup(dut)
+    await transaction(dut, 0x1010, value=0xFEDCBA)
+    await FallingEdge(dut.clk)
+    dut.rst_n.value = 0
+    await ClockCycles(dut.clk, 3)
+    await FallingEdge(dut.clk)
+    dut.rst_n.value = 1
+    await ClockCycles(dut.clk, 2)
+    assert await transaction(dut, 0x1010) == 0xFEDCBA
 

@@ -1,3 +1,4 @@
+`timescale 1ns / 1ps
 `default_nettype none
 
 // The input handler gets a sample from the I2S Rx Slave and writes it to memory

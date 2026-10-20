@@ -1,3 +1,4 @@
+`timescale 1ns / 1ps
 `default_nettype none
 
 // -----------------------------------------------------------------------------
@@ -42,12 +43,16 @@
 module Bandpass_Filter #(
     parameter int BIT_WIDTH  = 24,
     parameter int FRAME_LEN  = 1920,
-    parameter int GUARD_BITS = 12   // must be >= 1
+    parameter int GUARD_BITS = 12,   // must be >= 1
+    parameter int DECIMATION = 1,   // write every Nth filtered sample
+    parameter bit DIRECT_FRAME_ADDRESS = 1'b0,
+    parameter int OUTPUT_SHIFT = 0   // shift right before storing (PCM -> Q12.12: 11)
 ) (
     input  logic                        rst_n,
     input  logic                        clk,
     input  logic                        start,
     input  logic [BIT_WIDTH-1:0]        frame_addr_base,
+    input  logic [BIT_WIDTH-1:0]        frame_addr_direct,
     input  logic signed [BIT_WIDTH-1:0] sample_in,
     output logic                        busy,
 
@@ -107,6 +112,8 @@ module Bandpass_Filter #(
     logic signed [STATE_W-1:0] y_sec;                               // final section output
 
     logic [SN_W-1:0]           sample_num;
+    localparam int DECIM_W = (DECIMATION > 1) ? $clog2(DECIMATION) : 1;
+    logic [DECIM_W-1:0] decim_count;
     logic [1:0]                res_sync;
     logic                      res_prev;
     logic                      res_posedge;
@@ -317,6 +324,7 @@ module Bandpass_Filter #(
             s2_in <= '0; s2_x1 <= '0; s2_x2 <= '0; s2_y1 <= '0; s2_y2 <= '0;
             y_sec       <= '0;
             sample_num  <= '0;
+            decim_count <= '0;
             res_sync    <= '0;
             res_prev    <= 1'b0;
             start_write <= 1'b0;
@@ -367,9 +375,18 @@ module Bandpass_Filter #(
 
                 // Load address and data one cycle BEFORE start_write rises
                 S_ROUND: begin
-                    val_out <= y_final;
-                    address <= frame_addr_base + sample_off;
-                    state   <= S_WRITE_REQ;
+                    // Process each incoming sample to preserve filter state.
+                    // Only every DECIMATION-th output consumes external RAM1.
+                    if (decim_count == DECIM_W'(DECIMATION-1)) begin
+                        decim_count <= '0;
+                        val_out <= $signed(y_final) >>> OUTPUT_SHIFT;
+                        address <= DIRECT_FRAME_ADDRESS ? frame_addr_direct :
+                                   frame_addr_base + sample_off;
+                        state <= S_WRITE_REQ;
+                    end else begin
+                        decim_count <= decim_count + 1'b1;
+                        state <= S_IDLE;
+                    end
                 end
 
                 S_WRITE_REQ: begin
@@ -397,4 +414,3 @@ module Bandpass_Filter #(
 
 endmodule
 
-`default_nettype wire

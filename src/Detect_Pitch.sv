@@ -1,10 +1,12 @@
+`timescale 1ns / 1ps
 // ============================================================================
 // Detect_Pitch : YIN pitch detector, memory-streaming, incremental
-//                autocorrelation, NO multiplier -- every multiplication is a
-//                pair of CORDIC divisions:  x*y = y / (1/x).
+//                autocorrelation; FPGA fast path uses signed DSP multipliers
+//                for products/squares. CORDIC remains for normalizations.
 //
 // Number format : signed Q(BIT_WIDTH-ONES_BIT).ONES_BIT (Q12.12), samples
-//                 normalised to |x| <= 1.0.  pitch is unsigned Q12.12 in Hz.
+//                 numerically bounded by upstream audio scaling; pitch is
+//                 unsigned Q12.12 in Hz.
 //                 period_samples is BIT_WIDTH/2 bits wide and holds only the
 //                 WHOLE number of samples in one period (no fraction), rounded
 //                 to the nearest sample: round(tau + interpolation correction).
@@ -24,8 +26,8 @@
 //   * opcode 0 : ans = B_out / A_out, operands and result all Q12.12,
 //                i.e. ans = (B << ONES_BIT) / A, valid over the full signed
 //                range of the result (quotients up to ~2047, e.g. 1/0.001).
-//   * Deterministic: same operands -> same ans (needed so a product that is
-//     removed from the autocorrelation is exactly the one that was added).
+//   * Multiplication results are deterministic Q12.12 fixed-point products
+//     (needed for add/remove autocorrelation symmetry).
 //   * ans holds its value until the next start.
 //   * cordic_busy is high by two cycles after the cycle cordic_start is high.
 //   * The denominator A_out is NEVER NEGATIVE and never zero when a division is
@@ -33,22 +35,32 @@
 //     outside the CORDIC (sign-magnitude).  Numerators (B_out) may be signed.
 //
 // Memory map (byte addresses, one 24-bit value per 4-byte slot)
-//   frame_base + 4*i     : sample i of the frame, i = 0 .. FRAME_LEN-1
+//   frame_base + 4*k     : physical ring slot k, k = 0 .. RING_LEN-1
+//   The module translates frame index i to slot
+//       (snapshot_idx + i) modulo RING_LEN, capturing snapshot_idx at start.
+//   The input sample writer uses frame_write_address and asserts
+//   frame_write_complete once its BRAM write is ACKNOWLEDGED.
 //   AUTOCOR_BASE + 4*lag : r(lag), lag = 0 .. TAU_MAX-1  (slot 0 = r(0) =
 //                          reference energy)
 //
 // Frame contract
-//   Every run after the first must see the previous frame shifted left by HOP
-//   samples with HOP new samples appended; the reference window is the last W
-//   samples.  frame_base is latched on `start`, so it may change while busy is
-//   high.  A break in contiguity needs a reset (rst_n clears the first-run
-//   flag, and the first run recomputes every lag from scratch).
+//   FRAME_LEN consecutive *time samples* are read in order despite physical
+//   ring wrap.  Every FRAME_LEN samples produces the first frame_ready; each
+//   subsequent HOP committed samples produces another frame_ready.  Pulse
+//   start after frame_ready to snapshot the oldest index of that logical frame.
+//   Incremental autocorrelation is only used if frame sequence numbers prove
+//   exactly one hop elapsed since the previous run.  Otherwise r is rebuilt.
+//   frame_base is the fixed *physical* ring base, NOT the moving oldest address.
+//   The writer may continue during detection, as long as it does not wrap
+//   around and overwrite the oldest still-needed sample. If it does, an
+//   overrun flag is raised and that YIN result is discarded.
+//   Normal ring wrap does NOT add discontinuities: sample i and i+1 remain
+//   consecutive in time even if they occupy last and first BRAM slots.
 //
 // Algorithm
 //   Pass 1  r(lag) += sum(new products) - sum(old products), for every lag.
-//           Loop is sample-major: 1/x[n] is computed once per sample n and
-//           reused for all lags (x[n]*x[n-lag] = x[n-lag] / (1/x[n])), with a
-//           read-modify-write of r(lag) per product.
+//           Loop is sample-major, each product uses a signed DSP multiply
+//           and a read-modify-write of r(lag).
 //             new : n = FRAME_LEN-HOP .. FRAME_LEN-1
 //             old : n = FRAME_LEN-W-HOP .. FRAME_LEN-W-1
 //           (first run: n = FRAME_LEN-W .. FRAME_LEN-1 after zeroing r)
@@ -69,6 +81,7 @@ module Detect_Pitch #(
     parameter int BIT_WIDTH = 24,
     parameter int ONES_BIT  = BIT_WIDTH/2,
     parameter int HOP       = 16,
+    parameter int RING_LEN  = 2048,    // power of two; fixed external frame region
 
     // Algorithm configuration (set these for the system; the defaults are the
     // production values.  Tests override them with a small configuration so a
@@ -84,7 +97,12 @@ module Detect_Pitch #(
     input  logic                        rst_n,
     input  logic                        clk,
     input  logic                        start,
-    input  logic [BIT_WIDTH-1:0]        frame_base,   // start address of the frame to process
+    input  logic [BIT_WIDTH-1:0]        frame_base,   // fixed physical ring region base
+    input  logic                        frame_write_complete, // 1 clock per committed filtered sample
+    output logic [BIT_WIDTH-1:0]        frame_write_address,  // address for the NEXT filtered sample
+    output logic                        frame_ready,   // 1 clock after initial fill and every HOP thereafter
+    output logic                        frame_missed,  // sticky: update arrived while YIN busy
+    output logic                        frame_overwrite, // sticky: writer overwrote active snapshot
     output logic                        busy,
     output logic [BIT_WIDTH-1:0]        pitch,            // Hz, Q12.12
     output logic [BIT_WIDTH/2-1:0]      period_samples,   // whole samples per period
@@ -111,6 +129,9 @@ module Detect_Pitch #(
     // Derived constants
     // ------------------------------------------------------------------------
     localparam int PERIOD_W = BIT_WIDTH/2;             // width of period_samples
+    localparam int RING_W = (RING_LEN > 1) ? $clog2(RING_LEN) : 1;
+    localparam int FILL_W = $clog2(FRAME_LEN + 1);
+    localparam int HOP_W = (HOP > 1) ? $clog2(HOP) : 1;
     localparam int IDX_W    = $clog2(FRAME_LEN + 1);
     localparam int LAG_W    = $clog2(TAU_MAX);
     localparam int D_SHIFT  = 2;                       // d is held >>2 so it fits 24 bits
@@ -134,6 +155,12 @@ module Detect_Pitch #(
     localparam logic [IDX_W-1:0] N_OLD_LAST = IDX_W'(FRAME_LEN - W - 1);
 
     // Elaboration-time sanity checks
+    if (RING_LEN < FRAME_LEN + HOP || (RING_LEN & (RING_LEN-1)) != 0) begin : g_chk_ring
+        $error("RING_LEN must be a power of two and >= FRAME_LEN + HOP");
+    end
+    if (FRAME_LEN <= 0 || HOP <= 0) begin : g_chk_nonzero
+        $error("FRAME_LEN and HOP must be positive");
+    end
     if (FRAME_LEN < W + HOP + TAU_MAX - 1) begin : g_chk_frame
         $error("FRAME_LEN must be >= W + HOP + TAU_MAX - 1 (old samples must still be in the frame)");
     end
@@ -183,13 +210,21 @@ module Detect_Pitch #(
     } state_t;
 
     state_t state, ret;
-    logic [1:0] gcnt;                     // guard cycles after cordic_start
+    logic saw_cordic_busy;                  // wait for a real high-then-low completion
     logic       pend;                     // memory transaction in flight
     logic       warm;                     // a full run has completed since reset
+    logic [RING_W-1:0] wr_idx;              // next physical slot for incoming sample
+    logic [RING_W-1:0] snapshot_idx;        // physical slot of logical frame sample 0
+    logic [FILL_W-1:0] fill_count;
+    logic [HOP_W-1:0] hop_count;
+    logic filled;
+    logic [31:0] frame_seq, last_run_seq;   // identify skipped HOP updates
+    logic snapshot_overwritten;            // current frame can no longer be trusted
     logic       sub;                      // pass 1: removing old products
     logic       eph;                      // pass 2 energy term: 0 = remove, 1 = add
     logic       zbyp;                     // d' bypassed to 1.0 (mean == 0)
-    logic       nneg;                     // pass 1: x[n] is negative (product sign)
+    logic       nneg;                     // retained for compatibility
+    logic signed [BIT_WIDTH-1:0] x_saved;
 
     // res edge detector.  res_sr is a one-deep shift register of res: it keeps
     // clocking in every state, so it always holds the value res had on the
@@ -199,7 +234,8 @@ module Detect_Pitch #(
     logic res_sr;
     wire  res_posedge = res && !res_sr;
 
-    logic [BIT_WIDTH-1:0]      base_q;    // latched frame_base
+    logic [BIT_WIDTH-1:0]      base_q;    // latched fixed physical frame_base
+    assign frame_write_address = frame_base + (BIT_WIDTH'(wr_idx) << 2);
     logic [LAG_W-1:0]          tau;
     logic [IDX_W-1:0]          n;
     logic signed [BIT_WIDTH-1:0] ref_e;   // r(0)
@@ -228,14 +264,22 @@ module Detect_Pitch #(
 
     wire ac_sel = (state == S_INIT) || (state == S_RRD) || (state == S_RWR)
                || (state == S_REF)  || (state == S_R2RD);
-    wire [BIT_WIDTH-1:0] addr_base = ac_sel ? AUTOCOR_BASE : base_q;
-    wire [BIT_WIDTH-1:0] addr_off  = ac_sel ? BIT_WIDTH'(tau) : BIT_WIDTH'(idx);
-    wire [BIT_WIDTH-1:0] addr_next = addr_base + (addr_off << 2);
+    // Addition deliberately truncates to RING_W bits.  Since RING_LEN is a
+    // power of 2, this wraps ONLY inside the dedicated ring allocation.
+    // The autocorrelation region bypasses this translation completely.
+    wire [RING_W-1:0] physical_idx = snapshot_idx + RING_W'(idx);
+    wire [BIT_WIDTH-1:0] addr_next = ac_sel
+        ? (AUTOCOR_BASE + (BIT_WIDTH'(tau) << 2))
+        : (base_q + (BIT_WIDTH'(physical_idx) << 2));
 
     // ------------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------------
     wire signed [BIT_WIDTH-1:0] vin_s    = val_in;
+    wire signed [2*BIT_WIDTH-1:0] corr_product_full = x_saved * vin_s;
+    wire signed [BIT_WIDTH-1:0] corr_product = corr_product_full >>> ONES_BIT;
+    wire signed [2*BIT_WIDTH-1:0] square_full = vin_s * vin_s;
+    wire signed [BIT_WIDTH-1:0] square_q = square_full >>> ONES_BIT;
     wire                        vin_tiny = (vin_s <= TINY_S) && (vin_s >= -TINY_S);
     wire                        vin_zero = (val_in == '0);
     // |val_in|, saturating (|x| <= 1.0 in practice, so saturation never triggers)
@@ -275,6 +319,60 @@ module Detect_Pitch #(
     wire signed [BIT_WIDTH-1:0] dlt_c   = dneg ? -dlt_mag : dlt_mag;
 
     // ------------------------------------------------------------------------
+    // Ring writer progress and frame scheduler. The actual write is performed
+    // by Bandpass_Filter through the RAM1 arbiter and Memory_Controller.
+    // The caller must pulse frame_write_complete only for ACKNOWLEDGED writes.
+    // ------------------------------------------------------------------------
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            wr_idx <= '0;
+            snapshot_idx <= '0;
+            fill_count <= '0;
+            hop_count <= '0;
+            filled <= 1'b0;
+            frame_ready <= 1'b0;
+            frame_missed <= 1'b0;
+            frame_overwrite <= 1'b0;
+            snapshot_overwritten <= 1'b0;
+            frame_seq <= '0;
+        end else begin
+            frame_ready <= 1'b0;
+            if (start && !busy) begin
+                // wr_idx always points at the first *unwritten* ring slot.
+                snapshot_idx <= wr_idx - RING_W'(FRAME_LEN);
+                snapshot_overwritten <= 1'b0;
+            end
+            if (frame_write_complete) begin
+                // A snapshot is valid until wr_idx reaches its oldest sample.
+                // This guard is independent of normal wrap-around events.
+                if (busy && (wr_idx == snapshot_idx)) begin
+                    frame_overwrite <= 1'b1;
+                    snapshot_overwritten <= 1'b1;
+                end
+                wr_idx <= wr_idx + 1'b1;
+                if (!filled) begin
+                    if (fill_count == FILL_W'(FRAME_LEN-1)) begin
+                        filled <= 1'b1;
+                        frame_ready <= 1'b1;
+                        frame_seq <= frame_seq + 1'b1;
+                        hop_count <= '0;
+                        if (busy) frame_missed <= 1'b1;
+                    end else begin
+                        fill_count <= fill_count + 1'b1;
+                    end
+                end else if (hop_count == HOP_W'(HOP-1)) begin
+                    hop_count <= '0;
+                    frame_ready <= 1'b1;
+                    frame_seq <= frame_seq + 1'b1;
+                    if (busy) frame_missed <= 1'b1;
+                end else begin
+                    hop_count <= hop_count + 1'b1;
+                end
+            end
+        end
+    end
+
+    // ------------------------------------------------------------------------
     // Sequencer
     // ------------------------------------------------------------------------
     always_ff @(posedge clk) begin
@@ -290,6 +388,7 @@ module Detect_Pitch #(
             warm  <= 1'b0;
             pitch <= '0;
             period_samples <= '0;
+            last_run_seq <= '0;
         end else begin
             unique case (state)
             // ----------------------------------------------------------------
@@ -297,12 +396,13 @@ module Detect_Pitch #(
                 if (start) begin
                     busy   <= 1'b1;
                     base_q <= frame_base;
+                    last_run_seq <= frame_seq;
                     tau    <= '0;
                     sub    <= 1'b0;
                     eph    <= 1'b0;
                     M      <= '0;
                     prev1  <= BIT_WIDTH'(ONE_W);
-                    if (warm) begin
+                    if (warm && frame_seq == (last_run_seq + 32'd1)) begin
                         n     <= N_NEW0;
                         state <= S_NREAD;
                     end else begin
@@ -338,16 +438,12 @@ module Detect_Pitch #(
                     pend       <= 1'b1;
                 end else if (res_posedge) begin
                     pend <= 1'b0;
-                    if (vin_tiny) begin                // every product is 0
-                        state <= S_NNEXT;
-                    end else begin
-                        A_out <= vin_abs;              // 1 / |x[n]|  (denominator >= 0)
-                        B_out <= ONE_W;
-                        nneg  <= vin_s[BIT_WIDTH-1];   // remember the sign of x[n]
-                        tau   <= '0;
-                        ret   <= S_NREC;
-                        state <= S_CALL;
-                    end
+                    // FPGA fast path: use exact signed fixed-point product
+                    // instead of two serial CORDIC divides per multiplication.
+                    x_saved <= vin_s;
+                    tau <= '0;
+                    if (vin_tiny) state <= S_NNEXT;
+                    else          state <= S_TREAD;
                 end
             end
 
@@ -363,12 +459,11 @@ module Detect_Pitch #(
                     pend       <= 1'b1;
                 end else if (res_posedge) begin
                     pend <= 1'b0;
-                    if (vin_zero) begin
+                    if (vin_zero || corr_product == '0) begin
                         state <= S_TNEXT;
                     end else begin
-                        B_out <= vin_s;                // x[n-lag] / (1/|x[n]|) = x[n-lag]*|x[n]|
-                        ret   <= S_TPROD;
-                        state <= S_CALL;
+                        val_out <= corr_product;
+                        state <= S_RRD;
                     end
                 end
             end
@@ -467,11 +562,15 @@ module Detect_Pitch #(
                             state <= S_R2RD;
                         end
                     end else begin
-                        val_out <= vin_abs;            // keep |x|
-                        A_out   <= vin_abs;            // 1 / |x|  (denominator >= 0)
-                        B_out   <= ONE_W;
-                        ret     <= S_EREC;
-                        state   <= S_CALL;
+                        // Square in Q12.12. One DSP multiply instead of two
+                        // divisions. No sign handling needed for a square.
+                        lagged <= eph ? (lagged + square_q) : (lagged - square_q);
+                        if (!eph) begin
+                            eph   <= 1'b1;
+                            state <= S_ERD;
+                        end else begin
+                            state <= S_R2RD;
+                        end
                     end
                 end
             end
@@ -598,23 +697,24 @@ module Detect_Pitch #(
             // ----------------------------------------------------------------
             S_DONE: begin
                 busy  <= 1'b0;
-                warm  <= 1'b1;
+                warm  <= !snapshot_overwritten;
+                if (snapshot_overwritten) begin
+                    pitch <= '0;
+                    period_samples <= '0;
+                end
                 state <= S_IDLE;
             end
 
             // ---- CORDIC call: operands are already in A_out / B_out ---------
             S_CALL: begin
                 cordic_start <= 1'b1;
-                gcnt         <= '0;
+                saw_cordic_busy <= 1'b0;
                 state        <= S_CWAIT;
             end
 
             S_CWAIT: begin
-                if (gcnt[1]) begin
-                    if (!cordic_busy) state <= ret;
-                end else begin
-                    gcnt <= gcnt + 1'b1;
-                end
+                if (cordic_busy) saw_cordic_busy <= 1'b1;
+                if (saw_cordic_busy && !cordic_busy) state <= ret;
             end
 
             default: state <= S_IDLE;
@@ -623,3 +723,4 @@ module Detect_Pitch #(
     end
 
 endmodule
+

@@ -1,3 +1,4 @@
+`timescale 1ns / 1ps
 `default_nettype none 
 
 // Resampler needs to do the following things in a loop:
@@ -35,12 +36,14 @@ module Resampler #(
     parameter int INPUT_BUFFER_BASE = 'h10,
     parameter int CIRCULAR_BUFFER_BASE = 'h810,
     parameter int OUTPUT_BUFFER_BASE = 'h410,
-    parameter int CIRCULAR_BUFFER_LEN = 'd4096    // must be equal to 2^(BIT_WIDTH/2)
+    parameter int CIRCULAR_BUFFER_LEN = 'd4096, // power-of-two circular buffer
+    parameter bit DIRECT_CIRCULAR_INPUT = 1'b1 // samples already written by Input_Handler
 ) (
     input logic clk,
     input logic rst_n,
     input logic start,
     input logic [BIT_WIDTH-1:0] shift,
+    input logic [23:0] output_buffer_base_in,
     input logic [BIT_WIDTH-1:0] real_read_pos_in,
     input logic [BIT_WIDTH-1:0] write_pos_in,
     input logic [BIT_WIDTH/2-1:0] period_samples,
@@ -77,6 +80,7 @@ typedef enum logic[3:0] {
 state_t current_state, next_state;
 
 logic [BIT_WIDTH-1:0] write_pos, read_pos, real_read_pos, current_sample;
+logic [23:0] output_buffer_base_reg;
 logic [$clog2(BLOCK_SIZE)+1:0] num_samples_write, num_samples_read;
 logic [1:0] start_sreg, resA_sreg;
 logic start_posedge, resA_posedge;
@@ -108,11 +112,11 @@ assign underrun = (diff_r_minus_w < BLOCK_SIZE);
 always_comb begin
     next_state = current_state;
     case (current_state) 
-        IDLE: if (start_posedge) next_state = READ_INPUT;
+        IDLE: if (start_posedge) next_state = DIRECT_CIRCULAR_INPUT ? FIX_UNDERRUN : READ_INPUT;
         READ_INPUT: if (resA_posedge) next_state = WRITE_CIRCULAR;
         WRITE_CIRCULAR: if (resA_posedge) next_state = INCREMENT_WRITE_POS;
         INCREMENT_WRITE_POS: begin
-            if (num_samples_write == BLOCK_SIZE) begin 
+            if (num_samples_write == BLOCK_SIZE-1) begin 
                 // stop when we've written all BLOCK_SIZE samples to the circular buffer
                 next_state = FIX_UNDERRUN;
             end else begin
@@ -120,7 +124,7 @@ always_comb begin
             end
         end
         FIX_UNDERRUN: begin
-            if (!underrun) begin
+            if (!underrun || period_samples == '0) begin
                 next_state = READ_CIRCULAR;
             end
         end
@@ -137,7 +141,7 @@ always_comb begin
             end
         end
         FIX_OVERRUN: begin
-            if (!overrun) begin
+            if (!overrun || period_samples == '0) begin
                 if (num_samples_read == BLOCK_SIZE) begin
                     next_state = IDLE;
                 end else begin
@@ -152,6 +156,8 @@ end
 always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
         current_state <= IDLE;
+        start_sreg <= '0;
+        resA_sreg <= '0;
         real_read_pos_out <= '0;
         write_pos_out <= '0;
         read_pos_out <= '0;
@@ -166,6 +172,7 @@ always_ff @(posedge clk or negedge rst_n) begin
         num_samples_write <= '0;
         num_samples_read <= '0;
         current_sample <= '0;
+        output_buffer_base_reg <= 24'(OUTPUT_BUFFER_BASE);
     end else begin
         current_state <= next_state;
         start_sreg <= {start_sreg[0], start};
@@ -180,15 +187,17 @@ always_ff @(posedge clk or negedge rst_n) begin
                 start_read_A <= 1'b0;
                 start_write_A <= 1'b0;
                 write_pos <= write_pos_in;
+                if (start_posedge) output_buffer_base_reg <= output_buffer_base_in;
                 read_pos <= read_pos_in;
                 real_read_pos <= real_read_pos_in;
                 num_samples_write <= '0;
                 num_samples_read <= '0;
+                if (DIRECT_CIRCULAR_INPUT) write_pos_out <= write_pos_in;
                 current_sample <= '0;
             end
             READ_INPUT: begin
                 // set address of input buffer base + write_pos offset
-                address_A <= INPUT_BUFFER_BASE + num_samples_write;
+                address_A <= 24'(INPUT_BUFFER_BASE) + (24'(num_samples_write) << 2);
                 start_read_A <= 1'b1;
                 start_write_A <= 1'b0;
                 val_A <= '0;
@@ -199,7 +208,7 @@ always_ff @(posedge clk or negedge rst_n) begin
                 busy <= 1'b1;
             end
             WRITE_CIRCULAR: begin 
-                address_A <= CIRCULAR_BUFFER_BASE + {12'b0, write_pos[BIT_WIDTH-1:ONES_BIT]};
+                address_A <= 24'(CIRCULAR_BUFFER_BASE) + (24'(write_pos[BIT_WIDTH-1:ONES_BIT]) << 2);
                 val_A <= current_sample;
                 start_read_A <= 1'b0;
                 start_write_A <= 1'b1;
@@ -213,18 +222,16 @@ always_ff @(posedge clk or negedge rst_n) begin
                 start_read_A <= 1'b0;
                 start_write_A <= 1'b0;
                 current_sample <= '0;
-                if (num_samples_write != BLOCK_SIZE) begin
-                    write_pos <= write_pos + 13'h1000;  // the lower 12 bits correspond to the fractional portion
-                    // the circular buffer has length 4096 which automatically wraps with 24 bit width fixed point
-                    num_samples_write <= num_samples_write + 1'b1;
-                end else begin
-                    write_pos_out <= write_pos;
-                    num_samples_write <= '0;
-                end
+                // Exactly BLOCK_SIZE writes: on the final one, advance and
+                // publish the NEXT free write position in the ring.
+                write_pos <= write_pos + (BIT_WIDTH'(1) << ONES_BIT);
+                if (num_samples_write == BLOCK_SIZE-1)
+                    write_pos_out <= write_pos + (BIT_WIDTH'(1) << ONES_BIT);
+                num_samples_write <= num_samples_write + 1'b1;
             end
             FIX_UNDERRUN: begin
                 busy <= 1'b1;
-                if (underrun) begin
+                if (underrun && period_samples != '0) begin
                     read_pos <= read_pos + {period_samples, {ONES_BIT{1'b0}}};
                     real_read_pos <= real_read_pos + {period_samples, {ONES_BIT{1'b0}}};
                 end
@@ -232,7 +239,7 @@ always_ff @(posedge clk or negedge rst_n) begin
             READ_CIRCULAR: begin
                 // read the circular buffer for a sample
                 busy <= 1'b1;
-                address_A <= CIRCULAR_BUFFER_BASE + {12'b0, read_pos[BIT_WIDTH-1:ONES_BIT]};
+                address_A <= 24'(CIRCULAR_BUFFER_BASE) + (24'(read_pos[BIT_WIDTH-1:ONES_BIT]) << 2);
                 start_read_A <= 1'b1;
                 start_write_A <= 1'b0;
                 if (res_A) begin
@@ -243,7 +250,7 @@ always_ff @(posedge clk or negedge rst_n) begin
             WRITE_OUTPUT: begin
                 // write the read sample to the output buffer
                 busy <= 1'b1;
-                address_A <= OUTPUT_BUFFER_BASE + num_samples_read;
+                address_A <= output_buffer_base_reg + (24'(num_samples_read) << 2);
                 val_A <= current_sample;
                 start_read_A <= 1'b0;
                 start_write_A <= 1'b1;
@@ -268,7 +275,7 @@ always_ff @(posedge clk or negedge rst_n) begin
             FIX_OVERRUN: begin
                 // when read_pos boutta overtake write_pos we gotta subtract the period of the audio so that it lands in the same spot (no popping sound)
                 busy <= 1'b1;
-                if (overrun) begin
+                if (overrun && period_samples != '0) begin
                     // Standard replication {N{1'b0}} is much safer for synthesis than casts
                     read_pos <= read_pos - {period_samples, {ONES_BIT{1'b0}}};
                     real_read_pos <= real_read_pos - {period_samples, {ONES_BIT{1'b0}}};
@@ -287,3 +294,4 @@ end
 
 
 endmodule
+

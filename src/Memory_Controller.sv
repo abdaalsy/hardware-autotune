@@ -1,108 +1,107 @@
-`default_nettype none 
+`timescale 1ns / 1ps
+`default_nettype none
+// Drop-in Basys 3 on-chip block RAM implementation of Memory_Controller.
+// Keeps the original interface so existing callers do not need rewiring.
 
+//
+// Addressing:
+//   address_in is a BYTE address.
+//   Each 24-bit sample occupies a 4-byte slot; bits [1:0] must be zero.
+//   Internally, byte address 4*N maps to BRAM word N.
+//
+// Handshake:
+//   * Assert start_read OR start_write, with address/data stable.
+//   * One synchronous BRAM access occurs when the request is accepted.
+//   * res pulses high on a subsequent rising clock edge. For reads, val_out
+//     is valid before res rises and remains stable until the next read.
+//   * Bring both start signals low before making a new request.
+//   * Both one-clock pulses and requests held until res are supported.
+//
+// Each instance infers its own RAM. Instantiate one for RAM0 and one for RAM1.
+// The external SPI pins are retained solely for port compatibility; they are
+// inactive and can be removed once the top-level design is updated.
 module Memory_Controller #(
-    parameter int BIT_WIDTH = 24
+parameter int BIT_WIDTH   = 24,
+parameter int DEPTH_WORDS = 8192
 ) (
-    input logic rst_n,
-    input logic clk,
-    input logic [23:0] address_in,
-    input logic [BIT_WIDTH-1:0] val_in,
-    input logic                 start_read,
-    input logic                 start_write,
-    output logic res,
-    output logic [BIT_WIDTH-1:0] val_out,
-    output logic CS,
-    output logic MOSI,
-    input logic MISO,
-    output logic SCK
+input  logic                     rst_n,
+input  logic                     clk,
+input  logic [23:0]              address_in,
+input  logic [BIT_WIDTH-1:0]     val_in,
+input  logic                     start_read,
+input  logic                     start_write,
+output logic                     res,
+output logic [BIT_WIDTH-1:0]     val_out,
+output logic                     CS,
+output logic                     MOSI,
+input  logic                     MISO,
+output logic                     SCK
 );
+localparam int WORD_AW = (DEPTH_WORDS <= 1) ? 1 : $clog2(DEPTH_WORDS);
+// No reset or initialization of the memory array: BRAM-inference friendly.
+(* ram_style = "block" *)
+logic [BIT_WIDTH-1:0] ram [0:DEPTH_WORDS-1];
 
 typedef enum logic [1:0] {
     IDLE,
-    SERVICE,
-    OUTPUT
+    RESPOND,
+    WAIT_RELEASE
 } state_t;
+state_t state;
 
-state_t current_state, next_state;
+wire [WORD_AW-1:0] word_addr = address_in[WORD_AW+1:2];
+wire address_valid = (address_in[1:0] == 2'b00) &&
+                     ((address_in >> 2) < DEPTH_WORDS);
+wire accept_request = (state == IDLE) && (start_read || start_write);
 
-logic [2:0] req_sreg, busy_sreg;
-logic [7:0] command;
-logic [BIT_WIDTH-1:0] address;
-logic [31:0] value_in;
-logic [31:0] full_val_out;
-logic req_posedge, busy_negedge, start_spi, busy; 
-
-assign req_posedge = (req_sreg[2] == 1'b0 && req_sreg[1] == 1'b1);
-assign busy_negedge = (busy_sreg[2] == 1'b1 && busy_sreg[1] == 1'b0);
-assign val_out = full_val_out[31:(32-BIT_WIDTH)];
-
-SPI_Master u_SPI_Master (
-    .start(start_spi),
-    .clk(clk),
-    .rst_n(rst_n),
-    .cmnd_addr({command, address}),
-    .sample_in(value_in),
-    .sample_out(full_val_out),
-    .CS(CS),
-    .MOSI(MOSI),
-    .MISO(MISO),
-    .SCK(SCK),
-    .busy(busy)
-);
+// Single synchronous BRAM port. Writes take priority if both request
+// signals are erroneously asserted; the assertion below flags this.
+// val_out is intentionally not reset (resetting the memory read path can
+// interfere with inference on some tools).
+always_ff @(posedge clk) begin
+    if (rst_n && accept_request) begin
+        if (address_valid) begin
+            if (start_write)
+                ram[word_addr] <= val_in;
+            else
+                val_out <= ram[word_addr];
+        end else if (start_read) begin
+            val_out <= '0;
+        end
+    end
+end
 
 always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n) begin 
-        current_state <= IDLE;
-        req_sreg <= 3'b0;
-        busy_sreg <= 3'b111;
-        res <= 1'b1;
-        command <= 8'h00;
-        address <= '0;
-        value_in <= '0;
-        start_spi <= 1'b0;
+    if (!rst_n) begin
+        state <= IDLE;
+        res   <= 1'b0;
     end else begin
-        current_state <= next_state;
-        req_sreg <= {req_sreg[1:0], start_read | start_write};
-        busy_sreg <= {busy_sreg[1:0], busy};
-        case (current_state)
+        res <= 1'b0;
+        case (state)
             IDLE: begin
-                // val_out <= '0; let val_out keep its value from OUTPUT
-                value_in <= '0;
-                start_spi <= 1'b0;
+                if (start_read || start_write)
+                    state <= RESPOND;
             end
-            SERVICE: begin
-                res <= 1'b0;
-                if (start_read) begin
-                    command <= 8'h03;
-                end else if (start_write) begin
-                    command <= 8'h02;
-                    value_in <= {val_in, 8'h00};
-                end
-                address <= address_in;
-                start_spi <= 1'b1;
+            RESPOND: begin
+                res   <= 1'b1;
+                state <= WAIT_RELEASE;
             end
-            OUTPUT: begin
-                res <= 1'b1;
+            WAIT_RELEASE: begin
+                if (!start_read && !start_write)
+                    state <= IDLE;
             end
-            default: current_state <= IDLE;
+            default: state <= IDLE;
         endcase
     end
 end
 
-always_comb begin
-    next_state = current_state;
-    case (current_state)
-        IDLE: begin
-            if (req_posedge) next_state = SERVICE;
-        end
-        SERVICE: begin
-            if (busy_negedge) next_state = OUTPUT;
-        end
-        OUTPUT: next_state = IDLE;
-        default: next_state = IDLE;
-    endcase
-end
-
-
-
+// Kept only to preserve the original SPI-oriented module's port list.
+assign CS   = 1'b1;
+assign MOSI = 1'b0;
+assign SCK  = 1'b0;
+`ifndef SYNTHESIS
+always @(posedge clk) begin if (rst_n && accept_request) begin if (start_read && start_write) $error("Memory_Controller: start_read and start_write both asserted"); if (!address_valid) $error("Memory_Controller: invalid/unaligned byte address %h for depth %0d", address_in, DEPTH_WORDS); end end
+`endif
 endmodule
+`default_nettype wire
+

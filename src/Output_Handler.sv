@@ -1,3 +1,4 @@
+`timescale 1ns / 1ps
 `default_nettype none
 
 // Output handler reads memory for the latest sample to be played and outputs it to the I2S Tx Slave

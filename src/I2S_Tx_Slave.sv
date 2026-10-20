@@ -1,3 +1,5 @@
+`timescale 1ns / 1ps
+
 `default_nettype none 
 
 module I2S_Tx_Slave #(
