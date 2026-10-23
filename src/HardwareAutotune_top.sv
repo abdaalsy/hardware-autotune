@@ -206,6 +206,57 @@ module HardwareAutotune_top #(
     assign ram1_din[1] = yin_mem_val;
 
     // ------------------------------------------------------------------
+    // Median-of-three filter for VALID YIN pitch updates (100 Hz nominal).
+    // Filter the matched pitch, not the PCM samples. Keep the associated
+    // 6 kHz period from the SAME selected estimate so resampler phase jumps
+    // do not react to an isolated bad pitch detection.
+    //
+    // Startup: 1st valid reading passes through; 2nd holds the 1st;
+    // 3rd and later use median(previous two, current). Invalid/zero
+    // detections are ignored rather than contaminating the history.
+    // ------------------------------------------------------------------
+    logic [23:0] pitch_filtered, pitch_recent, pitch_older;
+    logic [11:0] period_recent, period_older;
+    logic [1:0] pitch_history_count;  // Saturates at 2.
+    logic [23:0] pitch_median_next;
+    logic [11:0] period_median_next;
+
+    always_comb begin
+        pitch_median_next = yin_pitch;
+        period_median_next = yin_period;
+        if (pitch_history_count == 2'd1) begin
+            // Duplicate the first pitch until three real readings exist.
+            pitch_median_next = pitch_recent;
+            period_median_next = period_recent;
+        end else if (pitch_history_count == 2'd2) begin
+            // Select the median, and its original period, without division.
+            if (pitch_recent <= pitch_older) begin
+                if (yin_pitch <= pitch_recent) begin
+                    pitch_median_next = pitch_recent;
+                    period_median_next = period_recent;
+                end else if (yin_pitch <= pitch_older) begin
+                    pitch_median_next = yin_pitch;
+                    period_median_next = yin_period;
+                end else begin
+                    pitch_median_next = pitch_older;
+                    period_median_next = period_older;
+                end
+            end else begin
+                if (yin_pitch <= pitch_older) begin
+                    pitch_median_next = pitch_older;
+                    period_median_next = period_older;
+                end else if (yin_pitch <= pitch_recent) begin
+                    pitch_median_next = yin_pitch;
+                    period_median_next = yin_period;
+                end else begin
+                    pitch_median_next = pitch_recent;
+                    period_median_next = period_recent;
+                end
+            end
+        end
+    end
+
+    // ------------------------------------------------------------------
     // Note table rebuild on startup and switch changes; match after YIN.
     // ------------------------------------------------------------------
     logic [4:0] selected_key,previous_key;
@@ -238,7 +289,7 @@ module HardwareAutotune_top #(
     logic signed [23:0] match_cd_A,match_cd_B;
     Match_Note #(.BIT_WIDTH(BIT_WIDTH),.IN_FRAC_BITS(12)) u_match (
         .rst_n(rst_n),.clk(clk),.start(match_start),
-        .num_notes(num_notes),.pitch(yin_pitch),.shift(matched_shift),
+        .num_notes(num_notes),.pitch(pitch_filtered),.shift(matched_shift),
         .busy(match_busy),.start_read(match_rd),
         .start_write(match_wr),.address(match_mem_addr),
         .val_out(match_mem_val),.val_in(ram1_read_value),
@@ -289,11 +340,14 @@ module HardwareAutotune_top #(
     logic [3:0] in_block_count,playback_idx;
     logic [23:0] write_pointer;
     logic pending_resample;
+    logic resample_job_active;  // only a REAL started job may complete
     logic produced_valid,produced_bank,play_bank,play_valid;
     logic resample_writing_bank;
     logic [11:0] output_prime_count;
     assign in_addr = CIRCULAR_BASE + ({12'b0,write_pointer[23:12]} << 2);
-    assign debug_pitch = yin_pitch;
+    // Public/debug pitch is the FILTERED value used by Match_Note.
+    // The unfiltered value remains visible internally as yin_pitch.
+    assign debug_pitch = pitch_filtered;
     assign debug_shift = ratio_current;
 
     always_ff @(posedge clk or negedge rst_n) begin
@@ -310,8 +364,15 @@ module HardwareAutotune_top #(
             read_pos <= '0; real_read_pos <= '0;
             ratio_current <= ONE; ratio_job <= ONE;
             period_current <= 12'd100; period_job <= 12'd100;
+            pitch_filtered <= '0;
+            pitch_recent <= '0;
+            pitch_older <= '0;
+            period_recent <= '0;
+            period_older <= '0;
+            pitch_history_count <= 2'd0;
             input_pending <= 1'b0; pending_resample <= 1'b0;
             output_job_base <= OUT0_BASE; job_bank <= 1'b0;
+            resample_job_active <= 1'b0;
             produced_valid <= 1'b0; produced_bank <= 1'b0;
             play_valid <= 1'b0; play_bank <= 1'b0;
             output_prime_count <= '0;
@@ -367,7 +428,8 @@ module HardwareAutotune_top #(
                 in_block_count <= in_block_count + 1'b1;
                 if (in_block_count == 4'(BLOCK_SIZE-1)) begin
                     in_block_count <= '0;
-                    if (pending_resample) overrun_flag <= 1'b1;
+                    if (pending_resample && output_prime_count >= 12'd2048)
+                        overrun_flag <= 1'b1; // ignore intentional prefill during warmup
                     pending_resample <= 1'b1;
                 end
             end
@@ -376,13 +438,15 @@ module HardwareAutotune_top #(
                 !(play_valid && playback_idx != 0 && job_bank == play_bank)) begin
                 // Only begin when the previous resampling job has completed.
                 resample_start <= 1'b1;
+                resample_job_active <= 1'b1;
                 ratio_job <= ratio_current;
                 period_job <= period_current;
                 output_job_base <= job_bank ? OUT1_BASE : OUT0_BASE;
                 resample_writing_bank <= job_bank;
                 pending_resample <= 1'b0;
             end
-            if (resample_busy_d && !resample_busy) begin
+            if (resample_job_active && resample_busy_d && !resample_busy) begin
+                resample_job_active <= 1'b0;
                 read_pos <= result_read_pos;
                 real_read_pos <= result_real_read_pos;
                 produced_valid <= 1'b1;
@@ -409,9 +473,22 @@ module HardwareAutotune_top #(
                 yin_start <= 1'b1;
             end
             if (yin_busy_d && !yin_busy) begin
-                period_current <= yin_period << 3; // period at 48kHz = 8 x 6k period
-                if (note_valid && !match_busy && yin_pitch != '0)
-                    match_start <= 1'b1;
+                // One history update per completed, voiced YIN estimate.
+                // Nonblocking assignments ensure Match_Note sees the new
+                // pitch_filtered when match_start is consumed next cycle.
+                if ($signed(yin_pitch) > 0 && yin_period != 0) begin
+                    pitch_filtered <= pitch_median_next;
+                    pitch_older <= pitch_recent;
+                    pitch_recent <= yin_pitch;
+                    period_older <= period_recent;
+                    period_recent <= yin_period;
+                    if (pitch_history_count < 2'd2)
+                        pitch_history_count <= pitch_history_count + 1'b1;
+                    // period at 48 kHz = 8 times the selected 6 kHz period
+                    period_current <= period_median_next << 3;
+                    if (note_valid && !match_busy)
+                        match_start <= 1'b1;
+                end
             end
             if (match_busy_d && !match_busy && matched_shift != '0)
                 ratio_current <= matched_shift;

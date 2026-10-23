@@ -1,82 +1,73 @@
-`timescale 1ns / 1ps
+`default_nettype none
 
-`default_nettype none 
-
+// 24-bit (configurable width) I2S transmitter, WS-HIGH channel only.
+// Assumes conventional I2S timing: WS changes one BCLK period before MSB.
+// Latches a sample on the WS rising edge, skips the transition/delay slot,
+// and sends bit BIT_WIDTH-1 on the NEXT detected BCLK falling edge.
+// SD changes on BCLK falling edge; DAC samples it on rising edge.
+// One 32-bit I2S time slot per channel at 48 kHz is compatible, with
+// all slots after the 24 data bits driven low.
 module I2S_Tx_Slave #(
-    parameter int BIT_WIDTH = 24    
-) ( 
-    input logic clk,
-    input logic bclk,
-    input logic ws,
+    parameter int BIT_WIDTH = 24
+) (
+    input  logic clk,
+    input  logic bclk,
+    input  logic ws,
     output logic sd,
-    input logic rst_n,
-    input logic [BIT_WIDTH-1:0] sample,
+    input  logic rst_n,
+    input  logic [BIT_WIDTH-1:0] sample,
     output logic busy
 );
+    localparam int COUNT_WIDTH = $clog2(BIT_WIDTH + 1);
 
-typedef enum logic[1:0] {
-    IDLE,
-    WAIT_BIT, // needed so that we dont shift sample reg after exiting reset
-    OUTPUT,
-    LAST_BIT
-} state_t;
+    // Synchronize asynchronous serial clocks to the 100 MHz system clock.
+    logic [2:0] bclk_sync, ws_sync;
+    wire bclk_fall = bclk_sync[2] && !bclk_sync[1];
+    wire ws_rise   = !ws_sync[2] && ws_sync[1];
+    wire ws_fall   = ws_sync[2] && !ws_sync[1];
 
-state_t current_state, next_state;
-logic[2:0] bclk_sreg, ws_sreg;
-logic bclk_negedge, ws_posedge, ws_negedge;
-logic[BIT_WIDTH-1:0] sample_reg;
+    logic active;
+    logic [COUNT_WIDTH-1:0] bit_count;
+    logic [BIT_WIDTH-1:0] shift_reg;
 
-assign bclk_negedge = (bclk_sreg[2] == 1'b1 && bclk_sreg[1] == 1'b0);
-assign ws_posedge   = (ws_sreg[2] == 1'b0 && ws_sreg[1] == 1'b1);
-assign ws_negedge   = (ws_sreg[2] == 1'b1 && ws_sreg[1] == 1'b0);
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            bclk_sync <= '0;
+            ws_sync   <= '0;
+            sd        <= 1'b0;
+            busy      <= 1'b0;
+            active    <= 1'b0;
+            bit_count <= '0;
+            shift_reg <= '0;
+        end else begin
+            bclk_sync <= {bclk_sync[1:0], bclk};
+            ws_sync   <= {ws_sync[1:0], ws};
 
-always_ff @(posedge clk, negedge rst_n) begin 
-    if (!rst_n) begin 
-        current_state <= IDLE;
-        bclk_sreg <= 3'b000;
-        ws_sreg <= 3'b000;
-        busy <= 1'b1;
-        sd <= 1'b0;
-        sample_reg <= '0;
-    end else begin 
-        current_state <= next_state;
-        bclk_sreg <= {bclk_sreg[1:0], bclk};
-    ws_sreg <= {ws_sreg[1:0], ws};
-        case (current_state)
-            IDLE: begin
-                busy <= 1'b0;
-                sample_reg <= sample;
-            end
-            WAIT_BIT: begin 
-                busy <= 1'b1;
-                sample_reg <= sample;
-            end
-            LAST_BIT: begin 
-                busy <= 1'b1;
-                if (bclk_negedge) begin 
-                    sd <= sample_reg[BIT_WIDTH-1]; // Send LSB
-                    sample_reg <= {sample_reg[BIT_WIDTH-2:0], 1'b0};
-                end 
-            end
-            OUTPUT: begin 
-                busy <= 1'b1;
-                if (bclk_negedge) begin 
-                    sd <= sample_reg[BIT_WIDTH-1]; // Send next bit (starting at MSB)
-                    sample_reg <= {sample_reg[BIT_WIDTH-2:0], 1'b0}; // shift sample register to the left
+            if (ws_rise) begin
+                // This WS/BCLK transition is the I2S one-bit delay,
+                // NOT the first payload bit.
+                shift_reg <= sample;
+                bit_count <= '0;
+                active    <= 1'b1;
+                busy      <= 1'b1;
+                sd        <= 1'b0;
+            end else if (ws_fall) begin
+                active    <= 1'b0;
+                busy      <= 1'b0;
+                bit_count <= '0;
+                sd        <= 1'b0;
+            end else if (bclk_fall) begin
+                if (active && bit_count < BIT_WIDTH) begin
+                    sd        <= shift_reg[BIT_WIDTH-1];
+                    shift_reg <= {shift_reg[BIT_WIDTH-2:0], 1'b0};
+                    bit_count <= bit_count + 1'b1;
+                end else begin
+                    // 32-bit I2S slots: remaining bits are padding.
+                    sd <= 1'b0;
                 end
             end
-        endcase
-    end 
-end 
-
-always_comb begin 
-    next_state = current_state;
-    case (current_state)
-        IDLE: if (ws_posedge) next_state = WAIT_BIT;
-        WAIT_BIT: if (bclk_negedge) next_state = OUTPUT;
-        OUTPUT: if (ws_negedge) next_state = LAST_BIT; // if there's no ws_negedge then design will hang
-        LAST_BIT: if (bclk_negedge) next_state = IDLE; 
-    endcase
-end
-
+        end
+    end
 endmodule
+
+`default_nettype wire

@@ -1,4 +1,3 @@
-`timescale 1ns / 1ps
 // ============================================================================
 // Detect_Pitch : YIN pitch detector, memory-streaming, incremental
 //                autocorrelation; FPGA fast path uses signed DSP multipliers
@@ -376,8 +375,17 @@ module Detect_Pitch #(
     // Sequencer
     // ------------------------------------------------------------------------
     always_ff @(posedge clk) begin
-        start_read   <= 1'b0;
-        start_write  <= 1'b0;
+        // A RAM request must remain asserted until THIS client receives its
+        // acknowledgment.  A one-clock request pulse can be dropped when
+        // RAM_Request_Arbiter is servicing another client (e.g. the filter).
+        // The arbiter's WAIT_DROP state ensures the acknowledged request is
+        // released before it accepts another one from the same client.
+        start_read <= rst_n && pend && !res_posedge &&
+                      ((state == S_NREAD) || (state == S_TREAD) ||
+                       (state == S_RRD)   || (state == S_REF)   ||
+                       (state == S_ERD)   || (state == S_R2RD));
+        start_write <= rst_n && pend && !res_posedge &&
+                       ((state == S_INIT) || (state == S_RWR));
         cordic_start <= 1'b0;
         res_sr       <= res;                  // runs in every state, including reset
 

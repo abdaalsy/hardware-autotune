@@ -1,4 +1,3 @@
-`timescale 1ns / 1ps
 `default_nettype none 
 
 // Resampler needs to do the following things in a loop:
@@ -82,13 +81,12 @@ state_t current_state, next_state;
 logic [BIT_WIDTH-1:0] write_pos, read_pos, real_read_pos, current_sample;
 logic [23:0] output_buffer_base_reg;
 logic [$clog2(BLOCK_SIZE)+1:0] num_samples_write, num_samples_read;
-logic [1:0] start_sreg, resA_sreg;
-logic start_posedge, resA_posedge;
+logic [1:0] start_sreg;
+logic start_posedge;
 logic underrun, overrun; // signals that'll indicate under/overruns
 logic pitching_up, pitching_down, pos_delta;
 
 assign start_posedge = (start_sreg[1] == 1'b0 && start_sreg[0] == 1'b1);
-assign resA_posedge = (resA_sreg[1] == 1'b0 && resA_sreg[0] == 1'b1);
 
 assign pitching_up = (shift[BIT_WIDTH-1:ONES_BIT] != 12'b0); // if the whole portion is non zero, then we are definitely pitching up
 assign pitching_down = (shift[BIT_WIDTH-1:ONES_BIT] == 12'b0); // if the whole portion is 0, then we are definitely pitching down
@@ -113,8 +111,8 @@ always_comb begin
     next_state = current_state;
     case (current_state) 
         IDLE: if (start_posedge) next_state = DIRECT_CIRCULAR_INPUT ? FIX_UNDERRUN : READ_INPUT;
-        READ_INPUT: if (resA_posedge) next_state = WRITE_CIRCULAR;
-        WRITE_CIRCULAR: if (resA_posedge) next_state = INCREMENT_WRITE_POS;
+        READ_INPUT: if (res_A) next_state = WRITE_CIRCULAR;
+        WRITE_CIRCULAR: if (res_A) next_state = INCREMENT_WRITE_POS;
         INCREMENT_WRITE_POS: begin
             if (num_samples_write == BLOCK_SIZE-1) begin 
                 // stop when we've written all BLOCK_SIZE samples to the circular buffer
@@ -129,10 +127,10 @@ always_comb begin
             end
         end
         READ_CIRCULAR: begin
-            if (resA_posedge) next_state = WRITE_OUTPUT;
+            if (res_A) next_state = WRITE_OUTPUT;
         end
         WRITE_OUTPUT: begin
-            if (resA_posedge) next_state = INCREMENT_READ_POS;
+            if (res_A) next_state = INCREMENT_READ_POS;
         end
         INCREMENT_READ_POS: next_state = FIX_POS_DELTA;
         FIX_POS_DELTA: begin
@@ -157,7 +155,6 @@ always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
         current_state <= IDLE;
         start_sreg <= '0;
-        resA_sreg <= '0;
         real_read_pos_out <= '0;
         write_pos_out <= '0;
         read_pos_out <= '0;
@@ -176,7 +173,6 @@ always_ff @(posedge clk or negedge rst_n) begin
     end else begin
         current_state <= next_state;
         start_sreg <= {start_sreg[0], start};
-        resA_sreg <= {resA_sreg[0], res_A};
 
         case (current_state)
             IDLE: begin
